@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       upload_tag:
-        description: 'Release tag to publish (e.g. gui-v1.1.0). Leave empty to only upload artifacts.'
+        description: 'Release tag to publish (e.g. gui-v1.1.1). Leave empty to only upload artifacts.'
         required: false
         default: ''
 
@@ -57,7 +57,7 @@ jobs:
           def has_utf16(s):
               return s.encode('utf-16-le') in data
           checks = {
-              'version 1.1.0': has_utf16('1.1.0'),
+              'version 1.1.1': has_utf16('1.1.1'),
               'RU title':      has_utf16('Zapret GUI — Discord и YouTube'),
               'EN title':      has_utf16('Zapret GUI — Discord & YouTube'),
               'RU tray exit':  has_utf16('Полный выход'),
