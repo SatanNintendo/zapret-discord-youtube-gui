@@ -20,6 +20,13 @@
 
 void zg_register_controls(void);
 
+/*
+ * Push a local background replica (gradient endpoints) into a control.
+ * Must be called after layout / theme / DPI changes; the control fills
+ * its whole memory bitmap with this before painting the chrome.
+ */
+void zg_ctrl_set_bg(HWND h, COLORREF top, COLORREF bottom);
+
 HWND zg_button_create(HWND parent, int id, const wchar_t* text, UINT style, int scheme);
 void zg_button_set_text(HWND h, const wchar_t* text);
 void zg_button_set_scheme(HWND h, int scheme);

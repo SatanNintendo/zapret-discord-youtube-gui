@@ -82,7 +82,7 @@ void theme_create_fonts(void)
 {
     theme_destroy_fonts();
     g_font_title  = make_font(200, L"Segoe UI Semibold", FW_SEMIBOLD);
-    g_font_status = make_font(200, L"Segoe UI", FW_BOLD);
+    g_font_status = make_font(180, L"Segoe UI", FW_BOLD);
     g_font_body   = make_font(100, L"Segoe UI", FW_NORMAL);
     g_font_body_b = make_font(100, L"Segoe UI Semibold", FW_SEMIBOLD);
     g_font_small  = make_font(85,  L"Segoe UI", FW_NORMAL);
@@ -493,7 +493,7 @@ static void paint_hero_text(HDC hdc)
         wcsncpy(sub, zg_str(S_SUB_IDLE), 199);
     sub[199] = 0;
 
-    RECT sr2 = { 0, SC(DU_SUBTXT_Y), SC(DU_WIN_W), SC(DU_SUBTXT_Y + 18) };
+    RECT sr2 = { 0, SC(DU_SUBTXT_Y), SC(DU_WIN_W), SC(DU_SUBTXT_Y + 16) };
     of = (HFONT)SelectObject(hdc, g_font_body);
     SetTextColor(hdc, files_ok ? COL_MUTED : COL_YELLOW);
     DrawTextW(hdc, sub, -1, &sr2, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
@@ -521,7 +521,7 @@ static void paint_cards_shapes(Graphics& g)
                             g_th.card_top, g_th.card_bot, g_th.border_dim, 35);
 
         /* status dot with glow */
-        int dy = y + SC(40);
+        int dy = y + SC(28);
         {
             Gdiplus::Color dc(zg_argb(255, dots[i]));
             Gdiplus::SolidBrush glow(Gdiplus::Color(60, dc.GetR(), dc.GetG(), dc.GetB()));
@@ -558,14 +558,14 @@ static void paint_cards_text(HDC hdc)
         HFONT of = (HFONT)SelectObject(hdc, g_font_h2);
         SetTextColor(hdc, COL_HDR);
         SetTextCharacterExtra(hdc, SC(1));
-        TextOutW(hdc, x + SC(16), y + SC(12), cards[i].title, (int)wcslen(cards[i].title));
+        TextOutW(hdc, x + SC(16), y + SC(10), cards[i].title, (int)wcslen(cards[i].title));
         SetTextCharacterExtra(hdc, 0);
         SelectObject(hdc, of);
 
         /* status text */
         of = (HFONT)SelectObject(hdc, g_font_body_b);
         SetTextColor(hdc, cards[i].ok ? COL_TEXT : COL_MUTED);
-        TextOutW(hdc, x + SC(30), y + SC(33), cards[i].text, (int)wcslen(cards[i].text));
+        TextOutW(hdc, x + SC(30), y + SC(26), cards[i].text, (int)wcslen(cards[i].text));
         SelectObject(hdc, of);
     }
 }
@@ -590,19 +590,59 @@ static void paint_settings_panel_shapes(Graphics& g)
 static void paint_settings_panel_text(HDC hdc)
 {
     int x = SC(DU_PAD), y = SC(DU_SET_Y), w = SC(DU_CONTENT_W);
+    int mid = x + w / 2;    /* the right half starts here */
 
-    const int labels[7] = {
-        S_LBL_STRAT, S_LBL_GAME, S_LBL_SVC, S_LBL_UPD,
-        S_LBL_IPSET, S_LBL_LANG, S_LBL_THEME
-    };
+    /*
+     * 7 labels in 4 rows: strategy is full-width; the other three
+     * rows carry two labels each. A label ends ~10px before its
+     * control, ellipsized if the text does not fit.
+     */
+    struct { int id; int row; int x0, x1; } L[7];
+    int n = 0;
+
+    /* row 0 — strategy (full width) */
+    L[n].id = S_LBL_STRAT; L[n].row = 0;
+    L[n].x0 = x + SC(16);
+    L[n].x1 = x + w - SC(16) - SC(DU_COMBO_W) - SC(10);
+    n++;
+
+    /* row 1 — game filter (left) + ipset (right) */
+    L[n].id = S_LBL_GAME; L[n].row = 1;
+    L[n].x0 = x + SC(16);
+    L[n].x1 = mid - SC(16) - SC(DU_COMBO_W2) - SC(10);
+    n++;
+    L[n].id = S_LBL_IPSET; L[n].row = 1;
+    L[n].x0 = mid + SC(16);
+    L[n].x1 = x + w - SC(16) - SC(DU_COMBO_W2B) - SC(10);
+    n++;
+
+    /* row 2 — service autostart (left) + update checks (right) */
+    L[n].id = S_LBL_SVC; L[n].row = 2;
+    L[n].x0 = x + SC(16);
+    L[n].x1 = mid - SC(16) - SC(46) - SC(10);
+    n++;
+    L[n].id = S_LBL_UPD; L[n].row = 2;
+    L[n].x0 = mid + SC(16);
+    L[n].x1 = x + w - SC(16) - SC(46) - SC(10);
+    n++;
+
+    /* row 3 — language (left) + theme (right) */
+    L[n].id = S_LBL_LANG; L[n].row = 3;
+    L[n].x0 = x + SC(16);
+    L[n].x1 = mid - SC(16) - SC(DU_COMBO_W3) - SC(10);
+    n++;
+    L[n].id = S_LBL_THEME; L[n].row = 3;
+    L[n].x0 = mid + SC(16);
+    L[n].x1 = x + w - SC(16) - SC(DU_COMBO_W3B) - SC(10);
+    n++;
 
     SetBkMode(hdc, TRANSPARENT);
     HFONT of = (HFONT)SelectObject(hdc, g_font_body);
     SetTextColor(hdc, COL_TEXT);
-    for (int i = 0; i < 7; i++) {
-        int ry = y + SC(6) + i * SC(DU_ROW_H);
-        RECT tr = { x + SC(16), ry, x + w - SC(260), ry + SC(DU_ROW_H) };
-        DrawTextW(hdc, zg_str(labels[i]), -1, &tr,
+    for (int i = 0; i < n; i++) {
+        int ry = y + SC(6) + L[i].row * SC(DU_ROW_H);
+        RECT tr = { L[i].x0, ry, L[i].x1, ry + SC(DU_ROW_H) };
+        DrawTextW(hdc, zg_str(L[i].id), -1, &tr,
                   DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
     }
     SelectObject(hdc, of);
@@ -662,6 +702,65 @@ static void paint_log_frame(Graphics& g)
 /* layout                                                              */
 /* ================================================================== */
 
+/* ---- local background replicas for the child controls -------------- */
+
+/*
+ * Mirrors zg_draw_chrome_panel(): a vertical gradient plus a white
+ * gloss fading out over the upper 55%. Integer math stays within
+ * ~1/255 per channel of what GDI+ renders — invisible under the 4px
+ * shadow fringe of a control.
+ */
+static COLORREF panel_color_at(int y, int gloss_alpha)
+{
+    int py = SC(DU_SET_Y), ph = SC(DU_SET_H);
+    int t = y - py;
+    if (t < 0) t = 0;
+    if (t > ph) t = ph;
+
+    int r = GetRValue(g_th.setp_top) + (GetRValue(g_th.setp_bot) - GetRValue(g_th.setp_top)) * t / ph;
+    int g = GetGValue(g_th.setp_top) + (GetGValue(g_th.setp_bot) - GetGValue(g_th.setp_top)) * t / ph;
+    int b = GetBValue(g_th.setp_top) + (GetBValue(g_th.setp_bot) - GetBValue(g_th.setp_top)) * t / ph;
+
+    int gh = ph * 55 / 100;
+    if (t < gh && gloss_alpha > 0) {
+        int a = gloss_alpha * (gh - t) / gh;   /* 0..gloss_alpha */
+        r += (255 - r) * a / 255;
+        g += (255 - g) * a / 255;
+        b += (255 - b) * a / 255;
+    }
+    if (r > 255) r = 255;
+    if (g > 255) g = 255;
+    if (b > 255) b = 255;
+    return RGB(r, g, b);
+}
+
+/* the settings-panel gradient colors under a control's top/bottom edge */
+static void set_panel_bg(HWND h)
+{
+    RECT r;
+    GetWindowRect(h, &r);
+    MapWindowPoints(HWND_DESKTOP, g_hMain, (POINT*)&r, 2);
+    zg_ctrl_set_bg(h, panel_color_at(r.top, 25), panel_color_at(r.bottom, 25));
+}
+
+/* push a local background replica into every child control */
+static void update_ctrl_bgs(void)
+{
+    if (!g_hMain) return;
+
+    /* controls sitting on the plain window background */
+    HWND plain[] = { g_hPrimary, g_hBtnDiag, g_hBtnHosts, g_hBtnIpset,
+                     g_hBtnTests, g_hBtnCheckUpd, g_hBtnLogClear };
+    for (int i = 0; i < (int)(sizeof(plain) / sizeof(plain[0])); i++)
+        if (plain[i]) zg_ctrl_set_bg(plain[i], g_th.bg, g_th.bg);
+
+    /* combos / toggles sitting on the chrome settings panel */
+    HWND panel[] = { g_hComboStrat, g_hComboGame, g_hComboIpset,
+                     g_hComboLang, g_hComboTheme, g_hTglSvc, g_hTglUpd };
+    for (int i = 0; i < (int)(sizeof(panel) / sizeof(panel[0])); i++)
+        if (panel[i]) set_panel_bg(panel[i]);
+}
+
 static void apply_layout(void)
 {
     if (!g_hMain) return;
@@ -684,50 +783,50 @@ static void apply_layout(void)
                  SC(DU_PRIMARY_W) + 2 * pad, SC(DU_PRIMARY_H) + 2 * pad,
                  SWP_NOZORDER | SWP_NOACTIVATE);
 
-    /* settings rows */
+    /*
+     * Settings rows (4). Row 0 = strategy, full width. Rows 1..3 carry
+     * two controls each: the left one is right-aligned to the mid-gap,
+     * the right one to the panel edge — same geometry the label
+     * painting in paint_settings_panel_text() uses.
+     */
     int px = SC(DU_PAD), pw = SC(DU_CONTENT_W);
+    int mid = px + pw / 2;
 #define ROW_Y(i)   (SC(DU_SET_Y + 6) + (i) * SC(DU_ROW_H))
 #define ROW_CY(i)  (ROW_Y(i) + (SC(DU_ROW_H) - SC(DU_CTRL_H)) / 2)
 #define ROW_TY(i)  (ROW_Y(i) + (SC(DU_ROW_H) - SC(24)) / 2)
 
-    /* strategy combo */
+    /* row 0: strategy combo (full width) */
     SetWindowPos(g_hComboStrat, NULL,
                  px + pw - SC(16) - SC(DU_COMBO_W) - pad, ROW_CY(0) - pad,
                  SC(DU_COMBO_W) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
                  SWP_NOZORDER | SWP_NOACTIVATE);
 
-    /* game combo */
+    /* row 1: game filter (left) + ipset (right) */
     SetWindowPos(g_hComboGame, NULL,
-                 px + pw - SC(16) - SC(DU_COMBO_W2) - pad, ROW_CY(1) - pad,
+                 mid - SC(16) - SC(DU_COMBO_W2) - pad, ROW_CY(1) - pad,
                  SC(DU_COMBO_W2) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
                  SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(g_hComboIpset, NULL,
+                 px + pw - SC(16) - SC(DU_COMBO_W2B) - pad, ROW_CY(1) - pad,
+                 SC(DU_COMBO_W2B) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
 
-    /* autostart toggle */
+    /* row 2: service autostart (left) + update checks (right) */
     SetWindowPos(g_hTglSvc, NULL,
+                 mid - SC(16) - SC(46), ROW_TY(2),
+                 SC(46), SC(24), SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(g_hTglUpd, NULL,
                  px + pw - SC(16) - SC(46), ROW_TY(2),
                  SC(46), SC(24), SWP_NOZORDER | SWP_NOACTIVATE);
 
-    /* update check toggle */
-    SetWindowPos(g_hTglUpd, NULL,
-                 px + pw - SC(16) - SC(46), ROW_TY(3),
-                 SC(46), SC(24), SWP_NOZORDER | SWP_NOACTIVATE);
-
-    /* ipset combo */
-    SetWindowPos(g_hComboIpset, NULL,
-                 px + pw - SC(16) - SC(DU_COMBO_W2) - pad, ROW_CY(4) - pad,
-                 SC(DU_COMBO_W2) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
-                 SWP_NOZORDER | SWP_NOACTIVATE);
-
-    /* language combo */
+    /* row 3: language (left) + theme (right) */
     SetWindowPos(g_hComboLang, NULL,
-                 px + pw - SC(16) - SC(DU_COMBO_W3) - pad, ROW_CY(5) - pad,
+                 mid - SC(16) - SC(DU_COMBO_W3) - pad, ROW_CY(3) - pad,
                  SC(DU_COMBO_W3) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
                  SWP_NOZORDER | SWP_NOACTIVATE);
-
-    /* theme combo */
     SetWindowPos(g_hComboTheme, NULL,
-                 px + pw - SC(16) - SC(DU_COMBO_W3) - pad, ROW_CY(6) - pad,
-                 SC(DU_COMBO_W3) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
+                 px + pw - SC(16) - SC(DU_COMBO_W3B) - pad, ROW_CY(3) - pad,
+                 SC(DU_COMBO_W3B) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
                  SWP_NOZORDER | SWP_NOACTIVATE);
 #undef ROW_Y
 #undef ROW_CY
@@ -746,6 +845,8 @@ static void apply_layout(void)
     SetWindowPos(g_hBtnLogClear, NULL,
                  SC(DU_WIN_W - DU_PAD) - SC(80), SC(DU_LOG_HDR_Y) - SC(3),
                  SC(80), SC(20), SWP_NOZORDER | SWP_NOACTIVATE);
+
+    update_ctrl_bgs();
 
     InvalidateRect(g_hMain, NULL, TRUE);
 }
@@ -925,6 +1026,18 @@ static const wchar_t* tray_tip_text(void)
     return zg_str(S_TRAY_TIP_OFF);
 }
 
+/* tooltip cache — skip NIM_MODIFY when nothing actually changed, so the
+ * 2-second status timer never touches an unchanged tray icon */
+static wchar_t g_tray_tip_cache[128];
+static int     g_tray_on_cache = -1;   /* -1 = nothing cached yet */
+
+static void tray_tip_cache_store(const wchar_t* tip)
+{
+    wcsncpy(g_tray_tip_cache, tip, 127);
+    g_tray_tip_cache[127] = 0;
+    g_tray_on_cache = g_st.winws_running ? 1 : 0;
+}
+
 static void tray_add(BOOL show_balloon)
 {
     NOTIFYICONDATAW nid;
@@ -939,6 +1052,9 @@ static void tray_add(BOOL show_balloon)
     nid.szTip[127] = 0;
 
     g_tray_added = Shell_NotifyIconW(NIM_ADD, &nid) ? TRUE : FALSE;
+
+    if (g_tray_added)
+        tray_tip_cache_store(tray_tip_text());
 
     /* one-time balloon so the user knows where the app went */
     if (g_tray_added && show_balloon && !g_balloon_shown) {
@@ -968,12 +1084,19 @@ static void tray_remove(void)
     nid.uID    = 1;
     Shell_NotifyIconW(NIM_DELETE, &nid);
     g_tray_added = FALSE;
+    g_tray_on_cache = -1;   /* force a fresh tooltip on the next add */
 }
 
 /* refresh icon + tooltip after a status change */
 static void tray_update_tooltip(void)
 {
     if (!g_tray_added) return;
+
+    const wchar_t* tip = tray_tip_text();
+    int on = g_st.winws_running ? 1 : 0;
+    if (g_tray_on_cache == on && wcscmp(g_tray_tip_cache, tip) == 0)
+        return;   /* unchanged — don't touch the tray icon */
+
     NOTIFYICONDATAW nid;
     ZeroMemory(&nid, sizeof(nid));
     nid.cbSize = sizeof(nid);
@@ -981,9 +1104,11 @@ static void tray_update_tooltip(void)
     nid.uID    = 1;
     nid.uFlags = NIF_ICON | NIF_TIP;
     nid.hIcon  = g_st.winws_running ? g_icoTrayOn : g_icoTrayOff;
-    wcsncpy(nid.szTip, tray_tip_text(), 127);
+    wcsncpy(nid.szTip, tip, 127);
     nid.szTip[127] = 0;
     Shell_NotifyIconW(NIM_MODIFY, &nid);
+
+    tray_tip_cache_store(tip);
 }
 
 static void show_main_window(void)
@@ -1170,6 +1295,9 @@ static void apply_ui_theme(int id)
     zg_log_clear(g_hLog);
     zg_log_apply_theme(g_hLog);
 
+    /* control fringe replicas depend on the palette */
+    update_ctrl_bgs();
+
     settings_save();
     invalidate_all();
     log_state_summary();
@@ -1178,6 +1306,19 @@ static void apply_ui_theme(int id)
 /* ================================================================== */
 /* window procedure                                                     */
 /* ================================================================== */
+
+/* true when the two status snapshots are visually identical — the 2s
+ * timer must not touch the screen (or the tray icon) in that case */
+static BOOL status_same(const ZgStatus* a, const ZgStatus* b)
+{
+    return a->winws_running     == b->winws_running
+        && a->own_child_alive   == b->own_child_alive
+        && a->svc_installed     == b->svc_installed
+        && a->svc_running       == b->svc_running
+        && a->windivert_running == b->windivert_running
+        && wcscmp(a->svc_strategy, b->svc_strategy) == 0
+        && wcscmp(a->local_version, b->local_version) == 0;
+}
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -1286,7 +1427,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 SC(DU_PAD), SC(DU_LOG_HDR_Y), SC(DU_CONTENT_W));
         }
 
-        BitBlt(hdc, 0, 0, cw, ch, mem, 0, 0, SRCCOPY);
+        BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top,
+               ps.rcPaint.right - ps.rcPaint.left,
+               ps.rcPaint.bottom - ps.rcPaint.top,
+               mem, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
         SelectObject(mem, obmp);
         DeleteObject(bmp);
         DeleteDC(mem);
@@ -1297,10 +1441,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_TIMER:
         if (wp == ZG_TIMER_STATUS) {
+            ZgStatus prev = g_st;      /* snapshot for change detection */
             zg_status_refresh(&g_st);
             refresh_primary_button();
             tray_update_tooltip();
-            InvalidateRect(hwnd, NULL, FALSE);
+            if (!status_same(&prev, &g_st))
+                InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
         break;
@@ -1632,8 +1778,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     wc.lpszClassName = ZG_WND_CLASS;
     RegisterClassExW(&wc);
 
-    /* window slightly larger than the 561x745 reference */
-    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    /* window slightly larger than the 561x745 reference; WS_CLIPCHILDREN
+     * keeps the parent's periodic repaints away from the child controls
+     * (footer buttons / combos / log) — the #1 flicker source before   */
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+                | WS_CLIPCHILDREN;
     RECT wr = { 0, 0, SC(DU_WIN_W), SC(DU_WIN_H) };
     AdjustWindowRect(&wr, style, FALSE);
 

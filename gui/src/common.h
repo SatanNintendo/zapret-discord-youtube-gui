@@ -10,7 +10,7 @@
 #include "lang.h"
 
 #define ZG_APP_NAME     L"Zapret GUI"
-#define ZG_GUI_VERSION  L"1.1.0"
+#define ZG_GUI_VERSION  L"1.1.1"
 #define ZG_WND_CLASS    L"ZapretGuiWnd"
 #define ZG_TIMER_STATUS 1
 

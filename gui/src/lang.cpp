@@ -69,7 +69,7 @@ const wchar_t* const TBL_RU[ZG_STR_COUNT] = {
     L"Игровой фильтр",
     L"Автозапуск с Windows (служба)",
     L"Проверять обновления zapret",
-    L"Фильтр IP-списков (IPSet)",
+    L"Фильтр IPSet",
     L"Язык интерфейса",
     L"Тема оформления",
 
@@ -238,7 +238,7 @@ const wchar_t* const TBL_EN[ZG_STR_COUNT] = {
     L"Game filter",
     L"Start with Windows (service)",
     L"Check for zapret updates",
-    L"IP list filter (IPSet)",
+    L"IPSet filter",
     L"Language",
     L"Theme",
 

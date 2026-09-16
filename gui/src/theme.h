@@ -97,66 +97,70 @@ void zg_theme_apply(int id);
 #define COL_LOG_TIME     (g_th.log_time)
 
 /* ------------------------------------------------------------------ */
-/* Layout — client size in design units (window slightly larger than   */
-/* the 561x745 reference). All metrics in design units, scaled at      */
-/* runtime by the current DPI.                                         */
+/* Layout — client size in design units. Height fits a 720p screen     */
+/* (672 + caption/borders ~ 711 px at 100% DPI). The 7 settings are   */
+/* packed into 4 rows: strategy keeps a full row, the three other     */
+/* rows carry two controls each (game+ipset, svc+upd, lang+theme).    */
+/* All metrics in design units, scaled at runtime by the current DPI.  */
 /* ------------------------------------------------------------------ */
 #define DU_WIN_W        660
-#define DU_WIN_H        996     /* +96: две новые строки настроек      */
+#define DU_WIN_H        672
 
 #define DU_PAD          24      /* side padding                        */
 #define DU_CONTENT_W    (DU_WIN_W - 2*DU_PAD)   /* 612                   */
 
 /* header */
-#define DU_ICON_SIZE    44
+#define DU_ICON_SIZE    38
 #define DU_ICON_X       DU_PAD
-#define DU_ICON_Y       24
-#define DU_TITLE_X      84
-#define DU_TITLE_Y      26
-#define DU_SUB_Y        58
-#define DU_VER_Y        26
-#define DU_UPDLINK_Y    50
+#define DU_ICON_Y       14
+#define DU_TITLE_X      76
+#define DU_TITLE_Y      15
+#define DU_SUB_Y        44
+#define DU_VER_Y        16
+#define DU_UPDLINK_Y    42
 
 /* hero */
-#define DU_HERO_TOP     104
+#define DU_HERO_TOP     64
 #define DU_CIRCLE_CX    (DU_WIN_W/2)
-#define DU_CIRCLE_CY    148
-#define DU_CIRCLE_R     36
-#define DU_STAT_Y       194
-#define DU_STAT_H       30
-#define DU_SUBTXT_Y     226
-#define DU_PRIMARY_W    360
-#define DU_PRIMARY_H    44
+#define DU_CIRCLE_CY    102
+#define DU_CIRCLE_R     28
+#define DU_STAT_Y       134
+#define DU_STAT_H       26
+#define DU_SUBTXT_Y     160
+#define DU_PRIMARY_W    340
+#define DU_PRIMARY_H    38
 #define DU_PRIMARY_X    ((DU_WIN_W - DU_PRIMARY_W)/2)
-#define DU_PRIMARY_Y    252
-#define DU_HERO_BOTTOM  300
+#define DU_PRIMARY_Y    190
+#define DU_HERO_BOTTOM  228
 
 /* status cards */
-#define DU_CARDS_Y      316
-#define DU_CARD_H       64
+#define DU_CARDS_Y      240
+#define DU_CARD_H       52
 #define DU_CARD_GAP     12
 #define DU_CARD_W       ((DU_CONTENT_W - 2*DU_CARD_GAP)/3)
 
-/* settings: 7 rows now (strategy, game, svc, upd, ipset, lang, theme) */
-#define DU_SET_HDR_Y    392
-#define DU_SET_Y        416
-#define DU_SET_ROWS     7
-#define DU_SET_H        (6 + DU_SET_ROWS*48 + 2)   /* 344              */
-#define DU_ROW_H        48
+/* settings: 4 rows — strategy, game+ipset, svc+upd, lang+theme */
+#define DU_SET_HDR_Y    300
+#define DU_SET_Y        318
+#define DU_SET_ROWS     4
+#define DU_SET_H        (6 + DU_SET_ROWS*42 + 2)   /* 176              */
+#define DU_ROW_H        42
 #define DU_ROW0_Y       (DU_SET_Y + 6)
 #define DU_CTRL_H       32
-#define DU_COMBO_W      240
-#define DU_COMBO_W2     200     /* game / ipset                         */
-#define DU_COMBO_W3     170     /* language / theme                     */
+#define DU_COMBO_W      250     /* strategy (full row)                  */
+#define DU_COMBO_W2     164     /* game filter (left half)             */
+#define DU_COMBO_W2B    150     /* ipset (right half)                  */
+#define DU_COMBO_W3     120     /* language (left half)                */
+#define DU_COMBO_W3B    130     /* theme (right half)                  */
 
 /* log */
-#define DU_LOG_HDR_Y    (DU_SET_Y + DU_SET_H + 16)   /* 776             */
-#define DU_LOG_Y        (DU_LOG_HDR_Y + 24)          /* 800             */
-#define DU_LOG_H        128
+#define DU_LOG_HDR_Y    (DU_SET_Y + DU_SET_H + 10)   /* 504             */
+#define DU_LOG_Y        (DU_LOG_HDR_Y + 20)          /* 524             */
+#define DU_LOG_H        100
 
 /* footer */
-#define DU_FOOT_Y       (DU_LOG_Y + DU_LOG_H + 16)   /* 944             */
-#define DU_FOOT_H       46
+#define DU_FOOT_Y       (DU_LOG_Y + DU_LOG_H + 8)    /* 632: fringe fits 672 */
+#define DU_FOOT_H       36
 #define DU_FOOT_GAP     10
 
 /* chrome shadow fringe added around shadowed controls (buttons, combos) */
