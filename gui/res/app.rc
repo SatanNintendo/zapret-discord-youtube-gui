@@ -1,0 +1,5 @@
+// Zapret GUI — app.rc
+// icon + embedded manifest
+
+1 ICON "app.ico"
+1 24 "app.manifest"

@@ -32,6 +32,33 @@ if "%~1"=="load_user_lists" (
     exit /b
 )
 
+:: Zapret GUI hooks - console actions with automatic elevation.
+:: After the action completes (pause inside), the script exits
+:: instead of showing the interactive menu (GUI_EXIT_AFTER flag).
+if /i "%~1"=="diag" (
+    call :check_extracted
+    net session >nul 2>&1 || (
+        echo Requesting admin rights...
+        powershell -NoProfile -Command "Start-Process 'cmd.exe' -ArgumentList '/c \"\"%~f0\" diag\"' -Verb RunAs"
+        exit /b
+    )
+    set "GUI_EXIT_AFTER=1"
+    call :service_diagnostics
+    exit /b
+)
+
+if /i "%~1"=="tests" (
+    call :check_extracted
+    net session >nul 2>&1 || (
+        echo Requesting admin rights...
+        powershell -NoProfile -Command "Start-Process 'cmd.exe' -ArgumentList '/c \"\"%~f0\" tests\"' -Verb RunAs"
+        exit /b
+    )
+    set "GUI_EXIT_AFTER=1"
+    call :run_tests
+    exit /b
+)
+
 if "%1"=="admin" (
     call :check_command chcp
     call :check_command find
@@ -55,6 +82,7 @@ if "%1"=="admin" (
 setlocal EnableDelayedExpansion
 title ZAPRET SERVICE MANAGER v!LOCAL_VERSION!
 :menu
+if defined GUI_EXIT_AFTER exit /b
 
 cls
 
