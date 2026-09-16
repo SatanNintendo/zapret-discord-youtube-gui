@@ -1,0 +1,111 @@
+name: Build Zapret GUI (x64)
+
+# Manual build of the Zapret GUI executable.
+#
+# Build resource (researched): the GUI is cross-compiled from Linux with the
+# MinGW-w64 toolchain — x86_64-w64-mingw32-g++ (POSIX threads) and
+# x86_64-w64-mingw32-windres, statically linked CRT, linking against
+# gdiplus / winhttp / shell32 / gdi32 / user32 / comctl32 / advapi32 / ole32.
+# The same toolchain ships in the Debian/Ubuntu `mingw-w64` apt package set,
+# so ubuntu-latest + apt install mingw-w64 reproduces the build 1:1.
+#
+# Result: one self-contained ZapretGUI.exe (PE32+ x64, no external DLLs),
+# compatible with Windows 7 SP1 x64 and later.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload_tag:
+        description: 'Release tag to publish (e.g. gui-v1.1.0). Leave empty to only upload artifacts.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install MinGW-w64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64 zip
+
+      - name: Show toolchain
+        run: |
+          x86_64-w64-mingw32-g++ --version | head -1
+          x86_64-w64-mingw32-windres --version | head -1
+
+      - name: Build ZapretGUI.exe (x64)
+        run: bash gui/build.sh
+
+      - name: Verify binary
+        run: |
+          file gui/build/ZapretGUI.exe
+          # must be a 64-bit PE executable for Windows (GUI subsystem)
+          file gui/build/ZapretGUI.exe | tee /tmp/fileinfo
+          grep -q "PE32+ executable.*x86-64" /tmp/fileinfo
+          # version + language sanity: the exe must embed UTF-16 strings of both languages
+          python3 - <<'EOF'
+          import re
+          data = open('gui/build/ZapretGUI.exe','rb').read()
+          def has_utf16(s):
+              return s.encode('utf-16-le') in data
+          checks = {
+              'version 1.1.0': has_utf16('1.1.0'),
+              'RU title':      has_utf16('Zapret GUI — Discord и YouTube'),
+              'EN title':      has_utf16('Zapret GUI — Discord & YouTube'),
+              'RU tray exit':  has_utf16('Полный выход'),
+              'EN tray exit':  has_utf16('Exit completely'),
+              'theme Midnight':has_utf16('Полночь'),
+          }
+          for name, ok in checks.items():
+              print(('OK  ' if ok else 'FAIL') + ' ' + name)
+              assert ok, 'missing: ' + name
+          print('binary string checks passed')
+          EOF
+
+      - name: Package
+        run: |
+          mkdir -p staging-compiled
+          cp gui/build/ZapretGUI.exe staging-compiled/
+          cp service.bat staging-compiled/
+          cp gui/dist-README.txt staging-compiled/README-GUI.txt
+          (cd staging-compiled && zip -r -X ../zapret-gui-compiled.zip .)
+          sha256sum zapret-gui-compiled.zip
+
+      - name: Upload compiled artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zapret-gui-compiled-x64
+          path: zapret-gui-compiled.zip
+          if-no-files-found: error
+
+      - name: Upload source snapshot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zapret-gui-sources
+          path: |
+            gui/
+            service.bat
+            .gitignore
+            .github/workflows/build-gui.yml
+          if-no-files-found: error
+
+      - name: Publish release (optional)
+        if: github.event.inputs.upload_tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.upload_tag }}
+        run: |
+          gh release create "$TAG" \
+            --title "Zapret GUI $TAG" \
+            --notes "Manual build of Zapret GUI (x64, Windows 7 SP1+ compatible) from commit $GITHUB_SHA." \
+            --verify-tag \
+            zapret-gui-compiled.zip || \
+          gh release upload "$TAG" zapret-gui-compiled.zip --clobber
