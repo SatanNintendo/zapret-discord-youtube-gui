@@ -7,9 +7,10 @@
 
 #include <windows.h>
 #include "theme.h"
+#include "lang.h"
 
 #define ZG_APP_NAME     L"Zapret GUI"
-#define ZG_GUI_VERSION  L"1.0.2"
+#define ZG_GUI_VERSION  L"1.1.0"
 #define ZG_WND_CLASS    L"ZapretGuiWnd"
 #define ZG_TIMER_STATUS 1
 
@@ -19,6 +20,11 @@
 #define WM_ZGCOMBO   (WM_APP + 3)   /* wparam = id, lparam = selected index  */
 #define WM_APP_LOG   (WM_APP + 4)   /* wparam = level, lparam = wchar_t*     */
 #define WM_APP_OPDONE (WM_APP + 5)  /* wparam = op id, lparam = result       */
+#define WM_APP_TRAY   (WM_APP + 6)  /* tray icon callback (classic format)   */
+
+/* tray menu commands */
+#define ZG_TRAY_CMD_OPEN 1
+#define ZG_TRAY_CMD_EXIT 2
 
 /* control ids */
 #define IDC_BTN_PRIMARY   100
@@ -31,6 +37,8 @@
 #define IDC_COMBO_STRAT   200
 #define IDC_COMBO_GAME    201
 #define IDC_COMBO_IPSET   202
+#define IDC_COMBO_LANG    203
+#define IDC_COMBO_THEME   204
 #define IDC_TOGGLE_SVC    300
 #define IDC_TOGGLE_UPD    301
 

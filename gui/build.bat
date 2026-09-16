@@ -14,6 +14,9 @@ echo [2/3] compiling sources...
 g++ -municode -mwindows -O2 -Wall -Wextra -std=c++17 ^
     src\main.cpp ^
     src\controls.cpp ^
+    src\uidraw.cpp ^
+    src\theme.cpp ^
+    src\lang.cpp ^
     src\zapret.cpp ^
     src\netops.cpp ^
     src\applog.cpp ^

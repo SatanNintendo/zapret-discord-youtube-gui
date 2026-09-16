@@ -14,11 +14,11 @@
 #define MSFTEDIT_CLASS L"RICHEDIT50W"
 #endif
 
-#define LOG_COLOR_INFO  RGB(0xC8, 0xC8, 0xC8)
+#define LOG_COLOR_INFO  COL_LOG_INFO
 #define LOG_COLOR_OK    COL_GREEN
 #define LOG_COLOR_WARN  COL_YELLOW
 #define LOG_COLOR_ERR   COL_RED
-#define LOG_COLOR_TIME  RGB(0x7A, 0x7A, 0x7A)
+#define LOG_COLOR_TIME  COL_LOG_TIME
 
 HWND zg_log_create(HWND parent, int x, int y, int w, int h)
 {
@@ -40,16 +40,25 @@ HWND zg_log_create(HWND parent, int x, int y, int w, int h)
     SendMessageW(hLog, EM_SETLIMITTEXT, 0, 0);   /* max capacity */
     SendMessageW(hLog, EM_SETTEXTMODE, (WPARAM)TM_MULTILEVELUNDO, 0);
 
+    zg_log_apply_theme(hLog);
+
+    return hLog;
+}
+
+/* re-apply the palette-dependent styling (background + default font) */
+void zg_log_apply_theme(HWND hLog)
+{
+    if (!hLog) return;
+    SendMessageW(hLog, EM_SETBKGNDCOLOR, 0, (LPARAM)COL_BG_DARK);
+
     CHARFORMAT2W cf;
     ZeroMemory(&cf, sizeof(cf));
     cf.cbSize = sizeof(cf);
     cf.dwMask = CFM_COLOR | CFM_FACE | CFM_SIZE;
-    cf.crTextColor = LOG_COLOR_INFO;
+    cf.crTextColor = COL_LOG_INFO;
     cf.yHeight = MulDiv(9 * 20, g_scale_pct, 100);   /* 9pt, DPI-scaled */
     wcscpy(cf.szFaceName, L"Consolas");
     SendMessageW(hLog, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
-
-    return hLog;
 }
 
 static void log_append_formatted(HWND hLog, COLORREF color, const wchar_t* stamp,

@@ -2,8 +2,10 @@
  * Zapret GUI — main.cpp
  * Application entry point, main window, layout and painting.
  *
- * Design recreated from the reference screenshot (dark theme,
- * green accent, purple->coral gradient primary button).
+ * Chrome restyle: glossy 3D buttons, gradient panels, soft shadows
+ * (see uidraw.cpp). Tray mode: closing hides to the notification area;
+ * the full exit lives in the tray menu. UI language (RU/EN) and theme
+ * (dark / light / midnight) switch at runtime.
  */
 #include <windows.h>
 #include <stdio.h>
@@ -19,6 +21,7 @@
 #include "zapret.h"
 #include "netops.h"
 #include "applog.h"
+#include "uidraw.h"
 
 using namespace Gdiplus;
 
@@ -36,6 +39,7 @@ static HWND g_hPrimary = NULL;
 static HWND g_hBtnDiag = NULL, g_hBtnHosts = NULL, g_hBtnIpset = NULL,
             g_hBtnTests = NULL, g_hBtnCheckUpd = NULL, g_hBtnLogClear = NULL;
 static HWND g_hComboStrat = NULL, g_hComboGame = NULL, g_hComboIpset = NULL;
+static HWND g_hComboLang = NULL, g_hComboTheme = NULL;
 static HWND g_hTglSvc = NULL, g_hTglUpd = NULL;
 static HWND g_hLog = NULL;
 
@@ -43,15 +47,15 @@ static wchar_t** g_strats = NULL;
 static int       g_stratCount = 0;
 static ZgStatus  g_st;
 static BOOL      g_busy = FALSE;      /* worker op in flight */
+static BOOL      g_hidden = FALSE;   /* window hidden to tray      */
+static BOOL      g_tray_added = FALSE;
+static BOOL      g_balloon_shown = FALSE;   /* once per session     */
+static UINT      g_msgTaskbarCreated = 0;
 
-static const wchar_t* GAME_LABELS[4] = {
-    L"Отключён", L"Включён (UDP)", L"Включён (TCP)", L"Включён (TCP и UDP)"
-};
+/* tray state icons (32bpp ARGB, generated at runtime) */
+static HICON g_icoTrayOn = NULL, g_icoTrayOff = NULL;
+
 static const int GAME_MODES[4] = { ZG_GAME_OFF, ZG_GAME_UDP, ZG_GAME_TCP, ZG_GAME_ALL };
-
-static const wchar_t* IPSET_LABELS[3] = {
-    L"Загружен (список)", L"Отключён (none)", L"Любой IP (any)"
-};
 static const int IPSET_MODES[3] = { ZG_IPSET_LOADED, ZG_IPSET_NONE, ZG_IPSET_ANY };
 
 /* ================================================================== */
@@ -61,7 +65,7 @@ static const int IPSET_MODES[3] = { ZG_IPSET_LOADED, ZG_IPSET_NONE, ZG_IPSET_ANY
 static HFONT make_font(int pt10, const wchar_t* face, int weight)
 {
     /*
-     * pt10       — font size in points x10 (e.g. 100 = 10.0pt)
+     * pt10        — font size in points x10 (e.g. 100 = 10.0pt)
      * g_scale_pct — scale in PERCENT (100 = 96 dpi, 150 = 144 dpi).
      *
      * hpx = -(pt10/10) pt * dpi / 72,  dpi = 96 * scale_pct / 100.
@@ -81,7 +85,7 @@ void theme_create_fonts(void)
     g_font_status = make_font(200, L"Segoe UI", FW_BOLD);
     g_font_body   = make_font(100, L"Segoe UI", FW_NORMAL);
     g_font_body_b = make_font(100, L"Segoe UI Semibold", FW_SEMIBOLD);
-    g_font_small  = make_font(90,  L"Segoe UI", FW_NORMAL);
+    g_font_small  = make_font(85,  L"Segoe UI", FW_NORMAL);
     g_font_h2     = make_font(95,  L"Segoe UI Semibold", FW_SEMIBOLD);
     g_font_btn    = make_font(105, L"Segoe UI Semibold", FW_SEMIBOLD);
     g_font_mono   = make_font(95,  L"Consolas", FW_NORMAL);
@@ -98,7 +102,7 @@ void theme_destroy_fonts(void)
 }
 
 /* ================================================================== */
-/* settings persistence (%APPDATA%\ZapretGUI\settings.ini)             */
+/* settings persistence (%APPDATA%\ZapretGUI\settings.ini)              */
 /* ================================================================== */
 
 static void settings_path(wchar_t* out, size_t cap)
@@ -111,25 +115,50 @@ static void settings_path(wchar_t* out, size_t cap)
     out[cap - 1] = 0;
 }
 
-static void settings_load(wchar_t* strat, size_t cap)
+typedef struct {
+    wchar_t strategy[80];
+    int     language;    /* ZG_LANG_*   */
+    int     theme;       /* ZG_THEME_*  */
+} ZgGuiSettings;
+
+static void settings_load(ZgGuiSettings* s)
 {
     wchar_t p[MAX_PATH]; settings_path(p, MAX_PATH);
-    strat[0] = 0;
-    GetPrivateProfileStringW(L"gui", L"strategy", L"", strat, (DWORD)cap, p);
+    s->strategy[0] = 0;
+    s->language = ZG_LANG_RU;
+    s->theme = ZG_THEME_DARK;
+
+    wchar_t lang[16], theme[16];
+    GetPrivateProfileStringW(L"gui", L"strategy", L"", s->strategy, 80, p);
+    GetPrivateProfileStringW(L"gui", L"language", L"", lang, 16, p);
+    GetPrivateProfileStringW(L"gui", L"theme", L"", theme, 16, p);
+
+    if (_wcsicmp(lang, L"en") == 0) s->language = ZG_LANG_EN;
+    if (_wcsicmp(theme, L"light") == 0)        s->theme = ZG_THEME_LIGHT;
+    else if (_wcsicmp(theme, L"midnight") == 0) s->theme = ZG_THEME_MIDNIGHT;
 }
 
-static void settings_save(const wchar_t* strat)
+static void settings_save(void)
 {
     wchar_t p[MAX_PATH]; settings_path(p, MAX_PATH);
     wchar_t dir[MAX_PATH];
     wcscpy(dir, p);
     wchar_t* slash = wcsrchr(dir, L'\\');
     if (slash) { *slash = 0; CreateDirectoryW(dir, NULL); }
-    WritePrivateProfileStringW(L"gui", L"strategy", strat, p);
+
+    int si = zg_combo_get_sel(g_hComboStrat);
+    if (si >= 0 && si < g_stratCount)
+        WritePrivateProfileStringW(L"gui", L"strategy", g_strats[si], p);
+    WritePrivateProfileStringW(L"gui", L"language",
+                                (g_lang == ZG_LANG_EN) ? L"en" : L"ru", p);
+    const wchar_t* th = L"dark";
+    if (g_theme == ZG_THEME_LIGHT)    th = L"light";
+    if (g_theme == ZG_THEME_MIDNIGHT) th = L"midnight";
+    WritePrivateProfileStringW(L"gui", L"theme", th, p);
 }
 
 /* ================================================================== */
-/* "zapret folder missing": folder picker + question dialog            */
+/* "zapret folder missing": folder picker + question dialog             */
 /* ================================================================== */
 
 /* {DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7} FileOpenDialog */
@@ -151,7 +180,7 @@ static BOOL pick_folder_dialog(HWND owner, wchar_t* out, DWORD cap)
     DWORD opts = 0;
     fd->GetOptions(&opts);
     fd->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
-    fd->SetTitle(L"Укажите папку zapret — где лежат bin\\winws.exe и general*.bat");
+    fd->SetTitle(zg_str(S_DLG_PICK_TITLE));
 
     BOOL ok = FALSE;
     hr = fd->Show(owner);
@@ -188,20 +217,13 @@ static int ask_missing_folder(HWND owner, const wchar_t* exe_dir)
             (FN_TaskDialogIndirect)(void*)GetProcAddress(cc, "TaskDialogIndirect");
         if (pTDI) {
             wchar_t content[800];
-            _snwprintf(content, 799,
-                L"ZapretGUI.exe запущен из папки:\n%s\n\n"
-                L"Там нет bin\\winws.exe.\n\n"
-                L"Папка zapret — это распакованный архив zapret-discord-youtube:\n"
-                L"внутри неё лежат bin\\, lists\\ и файлы general*.bat.\n"
-                L"Копировать ZapretGUI.exe внутрь не обязательно —\n"
-                L"можно просто указать эту папку.",
-                exe_dir);
+            _snwprintf(content, 799, zg_str(S_DLG_CONTENT), exe_dir);
             content[799] = 0;
 
             TASKDIALOG_BUTTON btns[3] = {
-                { 1001, L"Указать папку zapret…"    },
-                { 1002, L"Найти папку автоматически" },
-                { 1003, L"Продолжить без zapret"    },
+                { 1001, (PCWSTR)zg_str(S_DLG_BTN_PICK)   },
+                { 1002, (PCWSTR)zg_str(S_DLG_BTN_SEARCH) },
+                { 1003, (PCWSTR)zg_str(S_DLG_BTN_CONTINUE) },
             };
 
             TASKDIALOGCONFIG cfg;
@@ -209,9 +231,9 @@ static int ask_missing_folder(HWND owner, const wchar_t* exe_dir)
             cfg.cbSize             = sizeof(cfg);
             cfg.hwndParent         = owner;
             cfg.dwFlags            = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
-            cfg.pszWindowTitle     = L"Zapret GUI — файлы zapret не найдены";
+            cfg.pszWindowTitle     = zg_str(S_DLG_TITLE);
             cfg.pszMainIcon        = TD_WARNING_ICON;
-            cfg.pszMainInstruction = L"Файлы zapret не найдены";
+            cfg.pszMainInstruction  = zg_str(S_DLG_MAIN);
             cfg.pszContent         = content;
             cfg.pButtons           = btns;
             cfg.cButtons           = 3;
@@ -228,17 +250,11 @@ static int ask_missing_folder(HWND owner, const wchar_t* exe_dir)
     }
 
     /* fallback for environments without comctl32 v6: plain MessageBox
-     * Да = pick manually, Нет = retry autosearch, Отмена = continue   */
+     * Yes = pick manually, No = retry autosearch, Cancel = continue   */
     wchar_t text[900];
-    _snwprintf(text, 899,
-        L"Файлы zapret не найдены: рядом с ZapretGUI.exe нет bin\\winws.exe.\n\n"
-        L"ZapretGUI.exe запущен из папки:\n%s\n\n"
-        L"«Да» — указать папку zapret вручную\n"
-        L"«Нет» — повторить автоматический поиск\n"
-        L"«Отмена» — продолжить без zapret",
-        exe_dir);
+    _snwprintf(text, 899, zg_str(S_DLG_FB_TEXT), exe_dir);
     text[899] = 0;
-    int mb = MessageBoxW(owner, text, L"Zapret GUI — файлы zapret не найдены",
+    int mb = MessageBoxW(owner, text, zg_str(S_DLG_TITLE),
                          MB_ICONWARNING | MB_YESNOCANCEL | MB_DEFBUTTON1);
     if (mb == IDYES) return 1001;
     if (mb == IDNO)  return 1002;
@@ -267,6 +283,9 @@ static void ui_log(int level, const wchar_t* fmt, ...)
 
 static void set_controls_busy(BOOL busy);
 static void refresh_primary_button(void);
+static void update_ui_language(void);
+static void apply_ui_theme(int id);
+static void log_state_summary(void);
 
 /* ================================================================== */
 /* worker thread                                                       */
@@ -286,17 +305,17 @@ static DWORD WINAPI worker_thread(LPVOID param)
     case OP_SVC_INSTALL: {
         wchar_t err[256];
         if (wa->strat[0] && zg_service_install(wa->strat, err, 256))
-            zg_log_from_worker(ZLOG_OK, L"Служба zapret установлена и запущена (%s)", wa->strat);
+            zg_log_from_worker(ZLOG_OK, zg_str(S_LOG_SVC_INSTALLED), wa->strat);
         else
-            zg_log_from_worker(ZLOG_ERR, L"Ошибка установки службы: %s", err);
+            zg_log_from_worker(ZLOG_ERR, zg_str(S_LOG_SVC_INSTALL_ERR), err);
         break;
     }
     case OP_SVC_REMOVE: {
         wchar_t err[256];
         if (zg_service_remove(err, 256))
-            zg_log_from_worker(ZLOG_OK, L"Службы удалены (zapret, WinDivert)");
+            zg_log_from_worker(ZLOG_OK, L"%s", zg_str(S_LOG_SVC_REMOVED));
         else
-            zg_log_from_worker(ZLOG_ERR, L"Ошибка удаления службы: %s", err);
+            zg_log_from_worker(ZLOG_ERR, zg_str(S_LOG_SVC_REMOVE_ERR), err);
         break;
     }
     default: break;
@@ -326,30 +345,36 @@ static void run_op(int op, const wchar_t* strat_for_install)
 /* painting                                                            */
 /* ================================================================== */
 
-static Gdiplus::GraphicsPath* make_round_path(int x, int y, int w, int h, int r)
-{
-    Gdiplus::GraphicsPath* p = new Gdiplus::GraphicsPath();
-    int d = r * 2;
-    p->AddArc(x,     y,     d, d, 180, 90);
-    p->AddArc(x+w-d, y,     d, d, 270, 90);
-    p->AddArc(x+w-d, y+h-d, d, d,   0, 90);
-    p->AddArc(x,     y+h-d, d, d,  90, 90);
-    p->CloseFigure();
-    return p;
-}
-
 /* lightning bolt polygon (unit coords) */
 static const float BOLT_X[6] = { 0.585f, 0.245f, 0.460f, 0.415f, 0.760f, 0.535f };
 static const float BOLT_Y[6] = { 0.080f, 0.545f, 0.545f, 0.920f, 0.395f, 0.395f };
 
 static void draw_app_icon(Graphics& g, int x, int y, int size)
 {
-    /* purple rounded square with white bolt — same shape as app.ico */
-    Gdiplus::GraphicsPath* p = make_round_path(x, y, size, size, size / 4);
+    /* purple rounded square with white bolt + chrome gloss — matches app.ico */
+    Gdiplus::GraphicsPath* p = zg_round_path(x, y, size, size, size / 4);
     Gdiplus::LinearGradientBrush br(
         Gdiplus::Point(x, y), Gdiplus::Point(x, y + size),
         Gdiplus::Color(255, 0x8A, 0x6C, 0xF5), Gdiplus::Color(255, 0x6A, 0x50, 0xD8));
     g.FillPath(&br, p);
+
+    /* specular gloss on the upper half */
+    {
+        Gdiplus::LinearGradientBrush gl(Gdiplus::Point(x, y),
+                                         Gdiplus::Point(x, y + size * 55 / 100),
+                                         Gdiplus::Color(105, 255, 255, 255),
+                                         Gdiplus::Color(0, 255, 255, 255));
+        gl.SetWrapMode(Gdiplus::WrapModeClamp);
+        g.FillPath(&gl, p);
+    }
+
+    /* chrome rim */
+    {
+        Gdiplus::GraphicsPath* inset = zg_round_path(x + 1, y + 1, size - 2, size - 2, size / 4 - 1);
+        Gdiplus::Pen rim(Gdiplus::Color(120, 255, 255, 255), 1.0f);
+        g.DrawPath(&rim, inset);
+        delete inset;
+    }
     delete p;
 
     Gdiplus::PointF pts[6];
@@ -366,7 +391,7 @@ static void draw_app_icon(Graphics& g, int x, int y, int size)
 static void draw_section_header(HDC hdc, const wchar_t* text, int x, int y, int w)
 {
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(0x99, 0x99, 0x99));
+    SetTextColor(hdc, COL_HDR);
     HFONT of = (HFONT)SelectObject(hdc, g_font_h2);
     SetTextCharacterExtra(hdc, SC(2));
     TextOutW(hdc, x, y, text, (int)wcslen(text));
@@ -379,7 +404,6 @@ static void paint_hero_shapes(Graphics& g)
 {
     int cx = SC(DU_CIRCLE_CX), cy = SC(DU_CIRCLE_CY), r = SC(DU_CIRCLE_R);
     BOOL active = g_st.winws_running;
-    BOOL files_ok = g_paths.files_ok;
 
     /* glow rings */
     if (active) {
@@ -398,15 +422,26 @@ static void paint_hero_shapes(Graphics& g)
     }
 
     /* disc */
-    Gdiplus::SolidBrush disc(files_ok ? Gdiplus::Color(255, 0x12, 0x12, 0x12)
-                                      : Gdiplus::Color(255, 0x14, 0x10, 0x10));
+    Gdiplus::SolidBrush disc(Gdiplus::Color(zg_argb(255, g_th.hero_disc)));
     g.FillEllipse(&disc, cx - r, cy - r, r * 2, r * 2);
 
-    /* ring */
-    Gdiplus::Pen ring(active ? Gdiplus::Color(255, 0x32, 0xCD, 0x32)
-                             : Gdiplus::Color(255, 0x60, 0x60, 0x60),
-                      (Gdiplus::REAL)SC(3));
-    g.DrawEllipse(&ring, cx - r, cy - r, r * 2, r * 2);
+    /* chrome ring: vertical gradient stroke (metallic / glowing green) */
+    {
+        int pw = SC(3);
+        Gdiplus::Rect ringrc(cx - r - pw, cy - r - pw, (r + pw) * 2, (r + pw) * 2);
+        Gdiplus::Color c_top, c_bot;
+        if (active) {
+            c_top = Gdiplus::Color(255, 0x7C, 0xEC, 0x7C);
+            c_bot = Gdiplus::Color(255, 0x1F, 0x8F, 0x1F);
+        } else {
+            c_top = Gdiplus::Color(255, 0xC8, 0xCD, 0xD4);
+            c_bot = Gdiplus::Color(255, 0x4A, 0x50, 0x58);
+        }
+        Gdiplus::LinearGradientBrush rb(ringrc, c_top, c_bot,
+                                        Gdiplus::LinearGradientModeVertical);
+        Gdiplus::Pen ring(&rb, (Gdiplus::REAL)pw);
+        g.DrawEllipse(&ring, cx - r, cy - r, r * 2, r * 2);
+    }
 
     /* bolt */
     Gdiplus::PointF pts[6];
@@ -418,7 +453,7 @@ static void paint_hero_shapes(Graphics& g)
     Gdiplus::GraphicsPath bolt;
     bolt.AddPolygon(pts, 6);
     Gdiplus::SolidBrush wb(active ? Gdiplus::Color(255, 255, 255, 255)
-                                  : Gdiplus::Color(255, 0x8A, 0x8A, 0x8A));
+                                  : Gdiplus::Color(zg_argb(255, g_th.hero_bolt_off)));
     g.FillPath(&wb, &bolt);
 }
 
@@ -433,30 +468,30 @@ static void paint_hero_text(HDC hdc)
     RECT tr = { 0, SC(DU_STAT_Y), SC(DU_WIN_W), SC(DU_STAT_Y + DU_STAT_H) };
     HFONT of = (HFONT)SelectObject(hdc, g_font_status);
     SetTextColor(hdc, active ? COL_GREEN : (files_ok ? COL_MUTED : COL_RED));
-    DrawTextW(hdc, active ? L"ОБХОД ВКЛЮЧЁН"
-                  : (files_ok ? L"ОБХОД ВЫКЛЮЧЕН" : L"ФАЙЛЫ ZAPRET НЕ НАЙДЕНЫ"),
+    DrawTextW(hdc, active ? zg_str(S_ST_ON)
+                  : (files_ok ? zg_str(S_ST_OFF) : zg_str(S_ST_NOFILES)),
               -1, &tr, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
     SelectObject(hdc, of);
 
     /* subtext */
-    wchar_t sub[160];
+    wchar_t sub[200];
     if (!files_ok)
-        _snwprintf(sub, 159, L"укажите папку zapret — нажмите «Выбрать папку zapret» ниже");
+        wcsncpy(sub, zg_str(S_SUB_NOFILES), 199);
     else if (g_st.svc_running && g_st.winws_running)
-        _snwprintf(sub, 159, L"работает как служба — стратегия: %s",
+        _snwprintf(sub, 199, zg_str(S_SUB_SVC),
                    g_st.svc_strategy[0] ? g_st.svc_strategy : L"?");
     else if (g_st.own_child_alive && g_st.winws_running) {
         int idx = zg_combo_get_sel(g_hComboStrat);
-        _snwprintf(sub, 159, L"запущен из Zapret GUI — стратегия: %s",
+        _snwprintf(sub, 199, zg_str(S_SUB_OWN),
                    (idx >= 0 && idx < g_stratCount) ? g_strats[idx] : L"?");
     }
     else if (g_st.winws_running)
-        _snwprintf(sub, 159, L"winws.exe запущен вручную (вне Zapret GUI)");
+        wcsncpy(sub, zg_str(S_SUB_MANUAL), 199);
     else if (g_st.svc_installed)
-        _snwprintf(sub, 159, L"служба zapret установлена, но не запущена");
+        wcsncpy(sub, zg_str(S_SUB_SVCINST), 199);
     else
-        _snwprintf(sub, 159, L"нажмите кнопку ниже, чтобы включить обход");
-    sub[159] = 0;
+        wcsncpy(sub, zg_str(S_SUB_IDLE), 199);
+    sub[199] = 0;
 
     RECT sr2 = { 0, SC(DU_SUBTXT_Y), SC(DU_WIN_W), SC(DU_SUBTXT_Y + 18) };
     of = (HFONT)SelectObject(hdc, g_font_body);
@@ -464,8 +499,6 @@ static void paint_hero_text(HDC hdc)
     DrawTextW(hdc, sub, -1, &sr2, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
     SelectObject(hdc, of);
 }
-
-struct CardInfo { const wchar_t* title; const wchar_t* text; BOOL ok; COLORREF dot; };
 
 static void paint_cards_shapes(Graphics& g)
 {
@@ -481,16 +514,20 @@ static void paint_cards_shapes(Graphics& g)
     int w = SC(DU_CARD_W), h = SC(DU_CARD_H), y = SC(DU_CARDS_Y);
     for (int i = 0; i < 3; i++) {
         int x = SC(DU_PAD) + i * (w + SC(DU_CARD_GAP));
-        Gdiplus::GraphicsPath* p = make_round_path(x, y, w - 1, h - 1, SC(10));
-        Gdiplus::SolidBrush br(Gdiplus::Color(zg_argb(255, COL_PANEL)));
-        g.FillPath(&br, p);
-        Gdiplus::Pen pen(Gdiplus::Color(zg_argb(255, COL_BORDER_DIM)));
-        g.DrawPath(&pen, p);
-        delete p;
 
-        /* dot */
+        /* soft lift + chrome body */
+        zg_draw_shadow(g, x, y, w, h, SC(12), SC(3), 45);
+        zg_draw_chrome_panel(g, x, y, w, h, SC(12),
+                            g_th.card_top, g_th.card_bot, g_th.border_dim, 35);
+
+        /* status dot with glow */
         int dy = y + SC(40);
-        Gdiplus::SolidBrush dotb(dots[i]);
+        {
+            Gdiplus::Color dc(zg_argb(255, dots[i]));
+            Gdiplus::SolidBrush glow(Gdiplus::Color(60, dc.GetR(), dc.GetG(), dc.GetB()));
+            g.FillEllipse(&glow, x + SC(13), dy - SC(3), SC(13), SC(13));
+        }
+        Gdiplus::SolidBrush dotb(zg_argb(255, dots[i]));
         g.FillEllipse(&dotb, x + SC(16), dy, SC(7), SC(7));
     }
 }
@@ -499,17 +536,17 @@ static void paint_cards_text(HDC hdc)
 {
     struct { const wchar_t* title; const wchar_t* text; BOOL ok; } cards[3];
 
-    cards[0].title = L"ПРОЦЕСС WINWS";
-    cards[0].text  = g_st.winws_running ? L"работает" : L"не запущен";
+    cards[0].title = zg_str(S_CARD_WINWS);
+    cards[0].text  = g_st.winws_running ? zg_str(S_CARD_WINWS_ON) : zg_str(S_CARD_WINWS_OFF);
     cards[0].ok    = g_st.winws_running;
 
-    cards[1].title = L"СЛУЖБА ZAPRET";
-    if (g_st.svc_running)         { cards[1].text = L"запущена";          cards[1].ok = TRUE; }
-    else if (g_st.svc_installed)  { cards[1].text = L"установлена";       cards[1].ok = FALSE; }
-    else                          { cards[1].text = L"не установлена";   cards[1].ok = FALSE; }
+    cards[1].title = zg_str(S_CARD_SVC);
+    if (g_st.svc_running)         { cards[1].text = zg_str(S_CARD_SVC_RUN);  cards[1].ok = TRUE; }
+    else if (g_st.svc_installed)  { cards[1].text = zg_str(S_CARD_SVC_INST); cards[1].ok = FALSE; }
+    else                          { cards[1].text = zg_str(S_CARD_SVC_NONE); cards[1].ok = FALSE; }
 
-    cards[2].title = L"ДРАЙВЕР WINDIVERT";
-    cards[2].text  = g_st.windivert_running ? L"активен" : L"не активен";
+    cards[2].title = zg_str(S_CARD_WD);
+    cards[2].text  = g_st.windivert_running ? zg_str(S_CARD_WD_ON) : zg_str(S_CARD_WD_OFF);
     cards[2].ok    = g_st.windivert_running;
 
     int w = SC(DU_CARD_W), y = SC(DU_CARDS_Y);
@@ -519,7 +556,7 @@ static void paint_cards_text(HDC hdc)
 
         /* title */
         HFONT of = (HFONT)SelectObject(hdc, g_font_h2);
-        SetTextColor(hdc, RGB(0x99, 0x99, 0x99));
+        SetTextColor(hdc, COL_HDR);
         SetTextCharacterExtra(hdc, SC(1));
         TextOutW(hdc, x + SC(16), y + SC(12), cards[i].title, (int)wcslen(cards[i].title));
         SetTextCharacterExtra(hdc, 0);
@@ -536,17 +573,16 @@ static void paint_cards_text(HDC hdc)
 static void paint_settings_panel_shapes(Graphics& g)
 {
     int x = SC(DU_PAD), y = SC(DU_SET_Y), w = SC(DU_CONTENT_W), h = SC(DU_SET_H);
-    Gdiplus::GraphicsPath* p = make_round_path(x, y, w - 1, h - 1, SC(10));
-    Gdiplus::SolidBrush br(Gdiplus::Color(zg_argb(255, RGB(0x26, 0x26, 0x26))));
-    g.FillPath(&br, p);
-    Gdiplus::Pen pen(Gdiplus::Color(zg_argb(255, COL_BORDER_DIM)));
-    g.DrawPath(&pen, p);
-    delete p;
+
+    zg_draw_shadow(g, x, y, w, h, SC(12), SC(3), 45);
+    zg_draw_chrome_panel(g, x, y, w, h, SC(12),
+                         g_th.setp_top, g_th.setp_bot, g_th.border_dim, 25);
 
     /* row separators (subtle) */
-    for (int i = 1; i < 5; i++) {
+    for (int i = 1; i < DU_SET_ROWS; i++) {
         int sy = y + SC(6) + i * SC(DU_ROW_H);
-        Gdiplus::Pen sp(Gdiplus::Color(40, 0x44, 0x44, 0x44));
+        Gdiplus::Pen sp(Gdiplus::Color(45, GetRValue(g_th.border), GetGValue(g_th.border),
+                                       GetBValue(g_th.border)));
         g.DrawLine(&sp, x + SC(16), sy, x + w - SC(16), sy);
     }
 }
@@ -555,21 +591,18 @@ static void paint_settings_panel_text(HDC hdc)
 {
     int x = SC(DU_PAD), y = SC(DU_SET_Y), w = SC(DU_CONTENT_W);
 
-    /* labels */
-    static const wchar_t* labels[5] = {
-        L"Стратегия обхода",
-        L"Игровой фильтр",
-        L"Автозапуск с Windows (служба)",
-        L"Проверять обновления zapret",
-        L"Фильтр IP-списков (IPSet)",
+    const int labels[7] = {
+        S_LBL_STRAT, S_LBL_GAME, S_LBL_SVC, S_LBL_UPD,
+        S_LBL_IPSET, S_LBL_LANG, S_LBL_THEME
     };
+
     SetBkMode(hdc, TRANSPARENT);
     HFONT of = (HFONT)SelectObject(hdc, g_font_body);
     SetTextColor(hdc, COL_TEXT);
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 7; i++) {
         int ry = y + SC(6) + i * SC(DU_ROW_H);
-        RECT tr = { x + SC(16), ry, x + w - SC(240), ry + SC(DU_ROW_H) };
-        DrawTextW(hdc, labels[i], -1, &tr,
+        RECT tr = { x + SC(16), ry, x + w - SC(260), ry + SC(DU_ROW_H) };
+        DrawTextW(hdc, zg_str(labels[i]), -1, &tr,
                   DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
     }
     SelectObject(hdc, of);
@@ -593,35 +626,36 @@ static void paint_header_text(HDC hdc)
 
     of = (HFONT)SelectObject(hdc, g_font_body);
     SetTextColor(hdc, COL_MUTED);
-    TextOutW(hdc, SC(DU_TITLE_X), SC(DU_SUB_Y),
-             L"Обход блокировок Discord и YouTube", 34);
+    {
+        const wchar_t* s = zg_str(S_SUBTITLE);
+        TextOutW(hdc, SC(DU_TITLE_X), SC(DU_SUB_Y), s, (int)wcslen(s));
+    }
     SelectObject(hdc, of);
 
     /* version (top-right) */
     wchar_t ver[64];
-    _snwprintf(ver, 63, L"zapret %s  ·  GUI %s",
+    _snwprintf(ver, 63, L"zapret %s  \u00b7  GUI %s",
                g_st.local_version[0] ? g_st.local_version : L"?",
                ZG_GUI_VERSION);
     ver[63] = 0;
 
     of = (HFONT)SelectObject(hdc, g_font_small);
-    SetTextColor(hdc, RGB(0x90, 0x90, 0x90));
+    SetTextColor(hdc, g_th.ver);
     SIZE sz; GetTextExtentPoint32W(hdc, ver, (int)wcslen(ver), &sz);
     TextOutW(hdc, SC(DU_WIN_W - DU_PAD) - sz.cx, SC(DU_VER_Y), ver, (int)wcslen(ver));
     SelectObject(hdc, of);
 
-    /* "Проверить обновления" link is a child control (ZGBTN_LINK) */
+    /* update-check link is a child control (ZGBTN_LINK) */
 }
 
 static void paint_log_frame(Graphics& g)
 {
-    /* thin rounded border around the log area (control sits on top) */
+    /* chrome plate behind the log area (the RichEdit sits on top) */
     int x = SC(DU_PAD) - 1, y = SC(DU_LOG_Y) - 1;
     int w = SC(DU_CONTENT_W) + 2, h = SC(DU_LOG_H) + 2;
-    Gdiplus::GraphicsPath* p = make_round_path(x, y, w - 1, h - 1, SC(8));
-    Gdiplus::Pen pen(Gdiplus::Color(zg_argb(255, COL_BORDER_DIM)));
-    g.DrawPath(&pen, p);
-    delete p;
+    zg_draw_shadow(g, x, y, w, h, SC(8), SC(2), 35);
+    zg_draw_chrome_panel(g, x, y, w, h, SC(8),
+                         g_th.bg_dark, g_th.bg_dark, g_th.border_dim, 0);
 }
 
 /* ================================================================== */
@@ -632,18 +666,23 @@ static void apply_layout(void)
 {
     if (!g_hMain) return;
 
+    int pad = SC(DU_SHADOW);   /* chrome shadow fringe around controls */
+
     /* footer buttons */
     int fw = (SC(DU_CONTENT_W) - 3 * SC(DU_FOOT_GAP)) / 4;
     int fy = SC(DU_FOOT_Y), fh = SC(DU_FOOT_H);
     HWND foot[4] = { g_hBtnDiag, g_hBtnHosts, g_hBtnIpset, g_hBtnTests };
     for (int i = 0; i < 4; i++) {
         int fx = SC(DU_PAD) + i * (fw + SC(DU_FOOT_GAP));
-        SetWindowPos(foot[i], NULL, fx, fy, fw, fh, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(foot[i], NULL, fx - pad, fy - pad,
+                     fw + 2 * pad, fh + 2 * pad, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
     /* primary button */
-    SetWindowPos(g_hPrimary, NULL, SC(DU_PRIMARY_X), SC(DU_PRIMARY_Y),
-                 SC(DU_PRIMARY_W), SC(DU_PRIMARY_H), SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(g_hPrimary, NULL,
+                 SC(DU_PRIMARY_X) - pad, SC(DU_PRIMARY_Y) - pad,
+                 SC(DU_PRIMARY_W) + 2 * pad, SC(DU_PRIMARY_H) + 2 * pad,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
 
     /* settings rows */
     int px = SC(DU_PAD), pw = SC(DU_CONTENT_W);
@@ -653,13 +692,15 @@ static void apply_layout(void)
 
     /* strategy combo */
     SetWindowPos(g_hComboStrat, NULL,
-                 px + pw - SC(16) - SC(DU_COMBO_W), ROW_CY(0),
-                 SC(DU_COMBO_W), SC(DU_CTRL_H), SWP_NOZORDER | SWP_NOACTIVATE);
+                 px + pw - SC(16) - SC(DU_COMBO_W) - pad, ROW_CY(0) - pad,
+                 SC(DU_COMBO_W) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
 
     /* game combo */
     SetWindowPos(g_hComboGame, NULL,
-                 px + pw - SC(16) - SC(200), ROW_CY(1),
-                 SC(200), SC(DU_CTRL_H), SWP_NOZORDER | SWP_NOACTIVATE);
+                 px + pw - SC(16) - SC(DU_COMBO_W2) - pad, ROW_CY(1) - pad,
+                 SC(DU_COMBO_W2) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
 
     /* autostart toggle */
     SetWindowPos(g_hTglSvc, NULL,
@@ -673,25 +714,38 @@ static void apply_layout(void)
 
     /* ipset combo */
     SetWindowPos(g_hComboIpset, NULL,
-                 px + pw - SC(16) - SC(200), ROW_CY(4),
-                 SC(200), SC(DU_CTRL_H), SWP_NOZORDER | SWP_NOACTIVATE);
+                 px + pw - SC(16) - SC(DU_COMBO_W2) - pad, ROW_CY(4) - pad,
+                 SC(DU_COMBO_W2) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+
+    /* language combo */
+    SetWindowPos(g_hComboLang, NULL,
+                 px + pw - SC(16) - SC(DU_COMBO_W3) - pad, ROW_CY(5) - pad,
+                 SC(DU_COMBO_W3) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+
+    /* theme combo */
+    SetWindowPos(g_hComboTheme, NULL,
+                 px + pw - SC(16) - SC(DU_COMBO_W3) - pad, ROW_CY(6) - pad,
+                 SC(DU_COMBO_W3) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
 #undef ROW_Y
 #undef ROW_CY
 #undef ROW_TY
 
     /* header link */
     SetWindowPos(g_hBtnCheckUpd, NULL,
-                 SC(DU_WIN_W - DU_PAD) - SC(150), SC(DU_UPDLINK_Y),
-                 SC(150), SC(20), SWP_NOZORDER | SWP_NOACTIVATE);
+                 SC(DU_WIN_W - DU_PAD) - SC(160), SC(DU_UPDLINK_Y),
+                 SC(160), SC(20), SWP_NOZORDER | SWP_NOACTIVATE);
 
     /* log */
     SetWindowPos(g_hLog, NULL, SC(DU_PAD), SC(DU_LOG_Y),
                  SC(DU_CONTENT_W), SC(DU_LOG_H), SWP_NOZORDER | SWP_NOACTIVATE);
 
-    /* "Очистить" link above log, right-aligned */
+    /* "Clear" link above log, right-aligned */
     SetWindowPos(g_hBtnLogClear, NULL,
-                 SC(DU_WIN_W - DU_PAD) - SC(70), SC(DU_LOG_HDR_Y) - SC(3),
-                 SC(70), SC(20), SWP_NOZORDER | SWP_NOACTIVATE);
+                 SC(DU_WIN_W - DU_PAD) - SC(80), SC(DU_LOG_HDR_Y) - SC(3),
+                 SC(80), SC(20), SWP_NOZORDER | SWP_NOACTIVATE);
 
     InvalidateRect(g_hMain, NULL, TRUE);
 }
@@ -714,16 +768,27 @@ static void set_controls_busy(BOOL busy)
     zg_toggle_set_disabled(g_hTglUpd, busy);
 }
 
+static void invalidate_all(void)
+{
+    HWND ctrls[] = { g_hPrimary, g_hBtnDiag, g_hBtnHosts, g_hBtnIpset,
+                     g_hBtnTests, g_hBtnCheckUpd, g_hBtnLogClear,
+                     g_hComboStrat, g_hComboGame, g_hComboIpset,
+                     g_hComboLang, g_hComboTheme, g_hTglSvc, g_hTglUpd };
+    for (int i = 0; i < (int)(sizeof(ctrls) / sizeof(ctrls[0])); i++)
+        if (ctrls[i]) InvalidateRect(ctrls[i], NULL, TRUE);
+    if (g_hMain) InvalidateRect(g_hMain, NULL, TRUE);
+}
+
 static void refresh_primary_button(void)
 {
     if (!g_paths.files_ok) {
-        zg_button_set_text(g_hPrimary, L"ВЫБРАТЬ ПАПКУ ZAPRET");
+        zg_button_set_text(g_hPrimary, zg_str(S_BTN_PICK_DIR));
         zg_button_set_scheme(g_hPrimary, ZGBP_PURPLE);
     } else if (g_st.winws_running) {
-        zg_button_set_text(g_hPrimary, L"ВЫКЛЮЧИТЬ ОБХОД");
+        zg_button_set_text(g_hPrimary, zg_str(S_BTN_TURN_OFF));
         zg_button_set_scheme(g_hPrimary, ZGBP_PURPLE);
     } else {
-        zg_button_set_text(g_hPrimary, L"ВКЛЮЧИТЬ ОБХОД");
+        zg_button_set_text(g_hPrimary, zg_str(S_BTN_TURN_ON));
         zg_button_set_scheme(g_hPrimary, ZGBP_GREEN);
     }
     zg_button_set_disabled(g_hPrimary, g_busy);
@@ -758,7 +823,211 @@ static void refresh_status(BOOL full)
 }
 
 /* ================================================================== */
-/* switching the zapret base folder at runtime                        */
+/* system tray                                                          */
+/* ================================================================== */
+
+static void enable_dark_titlebar(HWND hwnd, BOOL dark);   /* defined below */
+
+/* draws the 32bpp ARGB tray state icon (active / inactive) at runtime */
+static HICON make_state_icon(BOOL active)
+{
+    int size = GetSystemMetrics(SM_CXSMICON);
+    if (size < 16) size = 16;
+    if (size > 48) size = 48;
+
+    BITMAPINFO bi;
+    ZeroMemory(&bi, sizeof(bi));
+    bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth       = size;
+    bi.bmiHeader.biHeight      = -(LONG)size;   /* top-down DIB */
+    bi.bmiHeader.biPlanes      = 1;
+    bi.bmiHeader.biBitCount    = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = NULL;
+    HBITMAP hbColor = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!hbColor) return NULL;
+    HBITMAP hbMask = CreateBitmap(size, size, 1, 1, NULL);
+    if (!hbMask) { DeleteObject(hbColor); return NULL; }
+
+    HICON icon = NULL;
+    {
+        HDC mdc = CreateCompatibleDC(NULL);
+        if (mdc) {
+            HGDIOBJ old = SelectObject(mdc, hbColor);
+            {
+                Gdiplus::Graphics g(mdc);
+                if (g.GetLastStatus() == Gdiplus::Ok) {
+                    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+                    int rad = size * 3 / 10;
+                    Gdiplus::GraphicsPath* p = zg_round_path(0, 0, size - 1, size - 1, rad);
+
+                    /* dark plate (visible on any taskbar) */
+                    Gdiplus::LinearGradientBrush br(
+                        Gdiplus::Point(0, 0), Gdiplus::Point(0, size),
+                        Gdiplus::Color(255, 0x33, 0x38, 0x40),
+                        Gdiplus::Color(255, 0x14, 0x17, 0x1C));
+                    g.FillPath(&br, p);
+
+                    /* gloss */
+                    Gdiplus::LinearGradientBrush gl(
+                        Gdiplus::Point(0, 0), Gdiplus::Point(0, size * 55 / 100),
+                        Gdiplus::Color(85, 255, 255, 255),
+                        Gdiplus::Color(0, 255, 255, 255));
+                    gl.SetWrapMode(Gdiplus::WrapModeClamp);
+                    g.FillPath(&gl, p);
+
+                    Gdiplus::Pen rim(Gdiplus::Color(210, 0x6A, 0x72, 0x80), 1.0f);
+                    g.DrawPath(&rim, p);
+                    delete p;
+
+                    /* state ring */
+                    int cx = size / 2, cy = size / 2, rr = size * 28 / 100;
+                    Gdiplus::Pen ring(active ? Gdiplus::Color(255, 0x32, 0xCD, 0x32)
+                                             : Gdiplus::Color(255, 0x9A, 0xA2, 0xAC),
+                                      (Gdiplus::REAL)(size / 10.0f));
+                    g.DrawEllipse(&ring, cx - rr, cy - rr, rr * 2, rr * 2);
+
+                    /* bolt */
+                    Gdiplus::PointF pts[6];
+                    float m = (float)rr * 0.95f;
+                    for (int i = 0; i < 6; i++) {
+                        pts[i].X = cx + m * (BOLT_X[i] * 2.0f - 1.0f);
+                        pts[i].Y = cy + m * (BOLT_Y[i] * 2.0f - 1.0f);
+                    }
+                    Gdiplus::GraphicsPath bolt;
+                    bolt.AddPolygon(pts, 6);
+                    Gdiplus::SolidBrush wb(Gdiplus::Color(255, 255, 255, 255));
+                    g.FillPath(&wb, &bolt);
+                }
+            }
+            SelectObject(mdc, old);
+            DeleteDC(mdc);
+
+            ICONINFO ii;
+            ZeroMemory(&ii, sizeof(ii));
+            ii.fIcon    = TRUE;
+            ii.hbmColor = hbColor;
+            ii.hbmMask  = hbMask;
+            icon = CreateIconIndirect(&ii);
+        }
+    }
+    DeleteObject(hbMask);
+    DeleteObject(hbColor);
+    return icon;
+}
+
+static const wchar_t* tray_tip_text(void)
+{
+    if (!g_paths.files_ok)      return zg_str(S_TRAY_TIP_NOFILES);
+    if (g_st.winws_running)     return zg_str(S_TRAY_TIP_ON);
+    return zg_str(S_TRAY_TIP_OFF);
+}
+
+static void tray_add(BOOL show_balloon)
+{
+    NOTIFYICONDATAW nid;
+    ZeroMemory(&nid, sizeof(nid));
+    nid.cbSize           = sizeof(nid);      /* full struct: OK on Vista+/Win7 */
+    nid.hWnd             = g_hMain;
+    nid.uID              = 1;
+    nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_APP_TRAY;
+    nid.hIcon            = g_st.winws_running ? g_icoTrayOn : g_icoTrayOff;
+    wcsncpy(nid.szTip, tray_tip_text(), 127);
+    nid.szTip[127] = 0;
+
+    g_tray_added = Shell_NotifyIconW(NIM_ADD, &nid) ? TRUE : FALSE;
+
+    /* one-time balloon so the user knows where the app went */
+    if (g_tray_added && show_balloon && !g_balloon_shown) {
+        NOTIFYICONDATAW nb;
+        ZeroMemory(&nb, sizeof(nb));
+        nb.cbSize   = sizeof(nb);
+        nb.hWnd     = g_hMain;
+        nb.uID      = 1;
+        nb.uFlags   = NIF_INFO;
+        nb.dwInfoFlags = NIIF_INFO;
+        wcsncpy(nb.szInfoTitle, zg_str(S_TRAY_BALLOON_TITLE), 63);
+        nb.szInfoTitle[63] = 0;
+        wcsncpy(nb.szInfo, zg_str(S_TRAY_BALLOON), 255);
+        nb.szInfo[255] = 0;
+        Shell_NotifyIconW(NIM_MODIFY, &nb);
+        g_balloon_shown = TRUE;
+    }
+}
+
+static void tray_remove(void)
+{
+    if (!g_tray_added) return;
+    NOTIFYICONDATAW nid;
+    ZeroMemory(&nid, sizeof(nid));
+    nid.cbSize = sizeof(nid);
+    nid.hWnd   = g_hMain;
+    nid.uID    = 1;
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+    g_tray_added = FALSE;
+}
+
+/* refresh icon + tooltip after a status change */
+static void tray_update_tooltip(void)
+{
+    if (!g_tray_added) return;
+    NOTIFYICONDATAW nid;
+    ZeroMemory(&nid, sizeof(nid));
+    nid.cbSize = sizeof(nid);
+    nid.hWnd   = g_hMain;
+    nid.uID    = 1;
+    nid.uFlags = NIF_ICON | NIF_TIP;
+    nid.hIcon  = g_st.winws_running ? g_icoTrayOn : g_icoTrayOff;
+    wcsncpy(nid.szTip, tray_tip_text(), 127);
+    nid.szTip[127] = 0;
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+static void show_main_window(void)
+{
+    ShowWindow(g_hMain, IsIconic(g_hMain) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(g_hMain);
+    g_hidden = FALSE;
+    refresh_status(TRUE);
+}
+
+static void hide_to_tray(HWND hwnd)
+{
+    tray_add(TRUE);
+    ShowWindow(hwnd, SW_HIDE);
+    g_hidden = TRUE;
+    ui_log(ZLOG_INFO, L"%s", zg_str(S_LOG_HIDDEN));
+}
+
+static void tray_show_menu(HWND hwnd)
+{
+    HMENU m = CreatePopupMenu();
+    if (!m) return;
+    AppendMenuW(m, MF_STRING, ZG_TRAY_CMD_OPEN, zg_str(S_TRAY_OPEN));
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING, ZG_TRAY_CMD_EXIT, zg_str(S_TRAY_EXIT));
+
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(hwnd);   /* classic TrackPopupMenu quirk */
+    int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
+                             pt.x, pt.y, 0, hwnd, NULL);
+    PostMessageW(hwnd, WM_NULL, 0, 0);
+    DestroyMenu(m);
+
+    if (cmd == ZG_TRAY_CMD_OPEN) {
+        show_main_window();
+    } else if (cmd == ZG_TRAY_CMD_EXIT) {
+        tray_remove();
+        DestroyWindow(hwnd);
+    }
+}
+
+/* ================================================================== */
+/* switching the zapret base folder at runtime                          */
 /* ================================================================== */
 
 /* destroy + recreate the strategy combo (items are fixed at creation) */
@@ -776,15 +1045,18 @@ static BOOL apply_zapret_dir(HWND hwnd, const wchar_t* dir)
 {
     if (!zg_set_base_dir(dir)) return FALSE;
     zg_save_dir_config(dir);
-    ui_log(ZLOG_OK, L"Папка zapret: %s", g_paths.exe_dir);
+    ui_log(ZLOG_OK, zg_str(S_LOG_DIR_SET), g_paths.exe_dir);
 
     if (g_strats) { zg_free_strategies(g_strats, g_stratCount); g_strats = NULL; }
     g_stratCount = zg_find_strategies(&g_strats);
 
     wchar_t saved[MAX_PATH];
-    settings_load(saved, MAX_PATH);
+    ZgGuiSettings st;
+    settings_load(&st);
     int def_idx = 0;
-    if (saved[0]) {
+    if (st.strategy[0]) {
+        wcsncpy(saved, st.strategy, MAX_PATH - 1);
+        saved[MAX_PATH - 1] = 0;
         for (int i = 0; i < g_stratCount; i++)
             if (_wcsicmp(g_strats[i], saved) == 0) { def_idx = i; break; }
     }
@@ -794,10 +1066,9 @@ static BOOL apply_zapret_dir(HWND hwnd, const wchar_t* dir)
     zg_status_refresh(&g_st);
     refresh_status(TRUE);
 
-    ui_log(ZLOG_INFO, L"Версия zapret: %s · найдено стратегий: %d",
-           g_st.local_version, g_stratCount);
+    ui_log(ZLOG_INFO, zg_str(S_LOG_VER_STRATS), g_st.local_version, g_stratCount);
     if (g_stratCount > 0)
-        ui_log(ZLOG_INFO, L"Текущая стратегия: %s",
+        ui_log(ZLOG_INFO, zg_str(S_LOG_CUR_STRAT),
                g_strats[zg_combo_get_sel(g_hComboStrat)]);
     (void)hwnd;
     return TRUE;
@@ -814,40 +1085,108 @@ static void fix_zapret_folder_flow(HWND hwnd)
             if (zg_dir_has_winws(dir)) {
                 apply_zapret_dir(hwnd, dir);
             } else {
-                ui_log(ZLOG_ERR, L"В выбранной папке нет bin\\winws.exe: %s", dir);
-                MessageBoxW(hwnd,
-                    L"В выбранной папке нет bin\\winws.exe.\n\n"
-                    L"Выберите папку, в которую распакован zapret —\n"
-                    L"внутри неё должны быть папки bin и lists\n"
-                    L"и файлы general*.bat.",
-                    L"Zapret GUI", MB_OK | MB_ICONWARNING);
+                ui_log(ZLOG_ERR, zg_str(S_LOG_DIR_BAD), dir);
+                MessageBoxW(hwnd, zg_str(S_MB_BAD_DIR),
+                            ZG_APP_NAME, MB_OK | MB_ICONWARNING);
             }
         }
     } else if (rc == 1002) {
         wchar_t dir[MAX_PATH];
-        ui_log(ZLOG_INFO, L"Повторный автопоиск папки zapret…");
+        ui_log(ZLOG_INFO, L"%s", zg_str(S_LOG_RETRY_SEARCH));
         if (zg_autosearch_dir(dir, MAX_PATH)) {
             apply_zapret_dir(hwnd, dir);
         } else {
-            ui_log(ZLOG_ERR, L"Папка zapret не найдена. Проверены: %s",
-                   zg_search_report());
-            MessageBoxW(hwnd,
-                L"Автоматический поиск не нашёл папку zapret.\n\n"
-                L"Нажмите «ВЫБРАТЬ ПАПКУ ZAPRET» и укажите папку,\n"
-                L"в которую распакован zapret (внутри — bin\\, lists\\,\n"
-                L"файлы general*.bat).",
-                L"Zapret GUI", MB_OK | MB_ICONWARNING);
+            ui_log(ZLOG_ERR, zg_str(S_LOG_NOT_FOUND), zg_search_report());
+            MessageBoxW(hwnd, zg_str(S_MB_NOT_FOUND),
+                        ZG_APP_NAME, MB_OK | MB_ICONWARNING);
         }
     }
     /* rc == 1003 or closed: keep running without zapret files */
 }
 
 /* ================================================================== */
-/* window procedure                                                    */
+/* runtime language / theme switching                                   */
+/* ================================================================== */
+
+static const wchar_t* theme_display_name(int id)
+{
+    switch (id) {
+    case ZG_THEME_LIGHT:    return zg_str(S_TH_LIGHT);
+    case ZG_THEME_MIDNIGHT: return zg_str(S_TH_MIDNIGHT);
+    default:                return zg_str(S_TH_DARK);
+    }
+}
+
+static void log_state_summary(void)
+{
+    ui_log(ZLOG_OK, zg_str(S_LOG_THEME_SET), theme_display_name(g_theme));
+    if (g_paths.files_ok) {
+        ui_log(ZLOG_INFO, zg_str(S_LOG_DIR_SET), g_paths.exe_dir);
+        ui_log(ZLOG_INFO, zg_str(S_LOG_VER_STRATS), g_st.local_version, g_stratCount);
+        if (g_stratCount > 0)
+            ui_log(ZLOG_INFO, zg_str(S_LOG_CUR_STRAT),
+                   g_strats[zg_combo_get_sel(g_hComboStrat)]);
+    } else {
+        ui_log(ZLOG_ERR, L"%s", zg_str(S_LOG_NOFILES_ERR));
+    }
+}
+
+static void update_ui_language(void)
+{
+    SetWindowTextW(g_hMain, zg_str(S_WINDOW_TITLE));
+
+    zg_button_set_text(g_hBtnCheckUpd, zg_str(S_CHECK_UPDATES));
+    zg_button_set_text(g_hBtnLogClear, zg_str(S_CLEAR));
+    zg_button_set_text(g_hBtnDiag,  zg_str(S_BTN_DIAG));
+    zg_button_set_text(g_hBtnHosts, zg_str(S_BTN_HOSTS));
+    zg_button_set_text(g_hBtnIpset, zg_str(S_BTN_IPSET));
+    zg_button_set_text(g_hBtnTests, zg_str(S_BTN_TESTS));
+    refresh_primary_button();
+
+    /* re-label the dynamic combos */
+    int gs = zg_combo_get_sel(g_hComboGame);
+    zg_combo_set_items(g_hComboGame, zg_game_labels(), 4, gs);
+
+    int is = zg_combo_get_sel(g_hComboIpset);
+    zg_combo_set_items(g_hComboIpset, zg_ipset_labels(), 3, is);
+
+    const wchar_t* thn[3] = { zg_str(S_TH_DARK), zg_str(S_TH_LIGHT), zg_str(S_TH_MIDNIGHT) };
+    int ts = zg_combo_get_sel(g_hComboTheme);
+    zg_combo_set_items(g_hComboTheme, thn, 3, ts);
+
+    tray_update_tooltip();
+    settings_save();
+    invalidate_all();
+    ui_log(ZLOG_OK, L"%s",
+           zg_str(g_lang == ZG_LANG_EN ? S_LOG_LANG_EN : S_LOG_LANG_RU));
+}
+
+static void apply_ui_theme(int id)
+{
+    zg_theme_apply(id);
+    if (g_hMain) enable_dark_titlebar(g_hMain, g_th.is_dark);
+
+    /* old colored log lines are unreadable on the new background — reset */
+    zg_log_clear(g_hLog);
+    zg_log_apply_theme(g_hLog);
+
+    settings_save();
+    invalidate_all();
+    log_state_summary();
+}
+
+/* ================================================================== */
+/* window procedure                                                     */
 /* ================================================================== */
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    /* TaskbarCreated: explorer restarted — re-add the tray icon */
+    if (g_msgTaskbarCreated && msg == g_msgTaskbarCreated) {
+        if (g_hidden) { g_tray_added = FALSE; tray_add(FALSE); }
+        return 0;
+    }
+
     switch (msg) {
 
     case WM_CREATE: {
@@ -855,27 +1194,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         /* header link */
         g_hBtnCheckUpd = zg_button_create(hwnd, IDC_BTN_CHECKUPD,
-                                          L"Проверить обновления", ZGBTN_LINK, 0);
+                                          zg_str(S_CHECK_UPDATES), ZGBTN_LINK, 0);
         /* log clear link */
         g_hBtnLogClear = zg_button_create(hwnd, IDC_BTN_LOGCLEAR,
-                                          L"Очистить", ZGBTN_LINK, 0);
+                                          zg_str(S_CLEAR), ZGBTN_LINK, 0);
         /* primary */
         g_hPrimary = zg_button_create(hwnd, IDC_BTN_PRIMARY,
-                                      L"ВКЛЮЧИТЬ ОБХОД", ZGBTN_PRIMARY, ZGBP_GREEN);
+                                      zg_str(S_BTN_TURN_ON), ZGBTN_PRIMARY, ZGBP_GREEN);
         /* footer */
-        g_hBtnDiag  = zg_button_create(hwnd, IDC_BTN_DIAG,  L"Диагностика",   ZGBTN_FLAT, 0);
-        g_hBtnHosts = zg_button_create(hwnd, IDC_BTN_HOSTS, L"Обновить hosts", ZGBTN_FLAT, 0);
-        g_hBtnIpset = zg_button_create(hwnd, IDC_BTN_IPSETUPD, L"Обновить IPSet", ZGBTN_FLAT, 0);
-        g_hBtnTests = zg_button_create(hwnd, IDC_BTN_TESTS, L"Тесты",         ZGBTN_FLAT, 0);
+        g_hBtnDiag  = zg_button_create(hwnd, IDC_BTN_DIAG,  zg_str(S_BTN_DIAG),  ZGBTN_FLAT, 0);
+        g_hBtnHosts = zg_button_create(hwnd, IDC_BTN_HOSTS, zg_str(S_BTN_HOSTS), ZGBTN_FLAT, 0);
+        g_hBtnIpset = zg_button_create(hwnd, IDC_BTN_IPSETUPD, zg_str(S_BTN_IPSET), ZGBTN_FLAT, 0);
+        g_hBtnTests = zg_button_create(hwnd, IDC_BTN_TESTS, zg_str(S_BTN_TESTS), ZGBTN_FLAT, 0);
 
         /* combos */
         g_hComboStrat = zg_combo_create(hwnd, IDC_COMBO_STRAT,
                                         (const wchar_t* const*)g_strats, g_stratCount,
                                         g_stratCount > 0 ? 0 : -1);
         g_hComboGame = zg_combo_create(hwnd, IDC_COMBO_GAME,
-                                        GAME_LABELS, 4, 0);
+                                        zg_game_labels(), 4, 0);
         g_hComboIpset = zg_combo_create(hwnd, IDC_COMBO_IPSET,
-                                        IPSET_LABELS, 3, 0);
+                                        zg_ipset_labels(), 3, 0);
+        g_hComboLang = zg_combo_create(hwnd, IDC_COMBO_LANG,
+                                        zg_lang_names(), zg_lang_name_count(), g_lang);
+        {
+            const wchar_t* thn[3] = { zg_str(S_TH_DARK), zg_str(S_TH_LIGHT),
+                                      zg_str(S_TH_MIDNIGHT) };
+            g_hComboTheme = zg_combo_create(hwnd, IDC_COMBO_THEME, thn, 3, g_theme);
+        }
 
         /* toggles */
         g_hTglSvc = zg_toggle_create(hwnd, IDC_TOGGLE_SVC, FALSE);
@@ -933,10 +1279,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             paint_header_text(mem);
             paint_hero_text(mem);
             paint_cards_text(mem);
-            draw_section_header(mem, L"НАСТРОЙКИ",
+            draw_section_header(mem, zg_str(S_SEC_SETTINGS),
                                 SC(DU_PAD), SC(DU_SET_HDR_Y), SC(DU_CONTENT_W));
             paint_settings_panel_text(mem);
-            draw_section_header(mem, L"ЖУРНАЛ СОБЫТИЙ",
+            draw_section_header(mem, zg_str(S_SEC_LOG),
                                 SC(DU_PAD), SC(DU_LOG_HDR_Y), SC(DU_CONTENT_W));
         }
 
@@ -953,6 +1299,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == ZG_TIMER_STATUS) {
             zg_status_refresh(&g_st);
             refresh_primary_button();
+            tray_update_tooltip();
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
         }
@@ -977,6 +1324,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (newpct >= 50 && newpct != g_scale_pct) {
             g_scale_pct = newpct;
             theme_create_fonts();
+            zg_log_apply_theme(g_hLog);   /* 9pt log font, DPI-scaled */
             apply_layout();
         }
         RECT* r = (RECT*)lp;
@@ -991,6 +1339,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         zg_combo_close_popup(g_hComboStrat);
         zg_combo_close_popup(g_hComboGame);
         zg_combo_close_popup(g_hComboIpset);
+        zg_combo_close_popup(g_hComboLang);
+        zg_combo_close_popup(g_hComboTheme);
         break;
 
     case WM_ACTIVATE:
@@ -998,10 +1348,35 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             zg_combo_close_popup(g_hComboStrat);
             zg_combo_close_popup(g_hComboGame);
             zg_combo_close_popup(g_hComboIpset);
+            zg_combo_close_popup(g_hComboLang);
+            zg_combo_close_popup(g_hComboTheme);
         } else {
             refresh_status(TRUE);
         }
         return 0;
+
+    /* ---- close = hide to tray; the full exit lives in the tray menu ---- */
+    case WM_CLOSE:
+        hide_to_tray(hwnd);
+        return 0;
+
+    case WM_QUERYENDSESSION:
+        return TRUE;                      /* allow logoff / shutdown */
+
+    case WM_ENDSESSION:
+        if (wp) tray_remove();            /* clean the icon up on logoff */
+        return 0;
+
+    /* ---- tray icon events (classic callback: message in lParam) ---- */
+    case WM_APP_TRAY: {
+        UINT em = (UINT)lp;
+        if (em == WM_LBUTTONUP || em == WM_LBUTTONDBLCLK) {
+            show_main_window();
+        } else if (em == WM_RBUTTONUP || em == WM_CONTEXTMENU) {
+            tray_show_menu(hwnd);
+        }
+        return 0;
+    }
 
     /* ---- custom control notifications ---- */
 
@@ -1016,39 +1391,39 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             if (g_st.winws_running) {
                 int stopped_svc = 0;
-                ui_log(ZLOG_INFO, L"Останавливаю обход…");
+                ui_log(ZLOG_INFO, L"%s", zg_str(S_LOG_STOPPING));
                 zg_stop_bypass(&stopped_svc);
-                ui_log(ZLOG_OK, stopped_svc
-                       ? L"Служба zapret остановлена, обход выключен"
-                       : L"Обход выключен (winws.exe остановлен)");
+                ui_log(ZLOG_OK, L"%s", zg_str(stopped_svc ? S_LOG_STOPPED_SVC
+                                                          : S_LOG_STOPPED));
             } else {
                 int idx = zg_combo_get_sel(g_hComboStrat);
                 if (idx < 0 || idx >= g_stratCount) {
-                    ui_log(ZLOG_ERR, L"Не выбрана стратегия обхода");
+                    ui_log(ZLOG_ERR, L"%s", zg_str(S_LOG_NO_STRAT));
                     break;
                 }
                 wchar_t err[256];
-                ui_log(ZLOG_INFO, L"Запускаю стратегию: %s", g_strats[idx]);
+                ui_log(ZLOG_INFO, zg_str(S_LOG_LAUNCHING), g_strats[idx]);
                 if (zg_launch_bypass(g_strats[idx], err, 256)) {
                     Sleep(400);
                     zg_status_refresh(&g_st);
                     if (g_st.winws_running)
-                        ui_log(ZLOG_OK, L"Обход запущен (winws.exe работает)");
+                        ui_log(ZLOG_OK, L"%s", zg_str(S_LOG_STARTED_OK));
                     else
-                        ui_log(ZLOG_ERR, L"winws.exe не запустился — проверьте стратегию");
+                        ui_log(ZLOG_ERR, L"%s", zg_str(S_LOG_STARTED_FAIL));
                 } else {
                     ui_log(ZLOG_ERR, L"%s", err);
                 }
             }
             refresh_status(TRUE);
+            tray_update_tooltip();
             break;
         }
         case IDC_BTN_DIAG:
-            ui_log(ZLOG_INFO, L"Открываю диагностику (консоль)…");
+            ui_log(ZLOG_INFO, L"%s", zg_str(S_LOG_OPEN_DIAG));
             zg_open_console_bat(L"diag");
             break;
         case IDC_BTN_TESTS:
-            ui_log(ZLOG_INFO, L"Запускаю тесты стратегий (PowerShell)…");
+            ui_log(ZLOG_INFO, L"%s", zg_str(S_LOG_RUN_TESTS));
             zg_open_console_bat(L"tests");
             break;
         case IDC_BTN_HOSTS:
@@ -1075,22 +1450,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (on) {
                 int idx = zg_combo_get_sel(g_hComboStrat);
                 if (idx < 0 || idx >= g_stratCount) {
-                    ui_log(ZLOG_ERR, L"Не выбрана стратегия для службы");
+                    ui_log(ZLOG_ERR, L"%s", zg_str(S_LOG_NO_STRAT_SVC));
                     zg_toggle_set(g_hTglSvc, FALSE, FALSE);
                     break;
                 }
-                ui_log(ZLOG_INFO, L"Устанавливаю службу zapret (%s)…", g_strats[idx]);
+                ui_log(ZLOG_INFO, zg_str(S_LOG_SVC_INSTALLING), g_strats[idx]);
                 run_op(OP_SVC_INSTALL, g_strats[idx]);
             } else {
-                ui_log(ZLOG_INFO, L"Удаляю службы zapret / WinDivert…");
+                ui_log(ZLOG_INFO, L"%s", zg_str(S_LOG_SVC_REMOVING));
                 run_op(OP_SVC_REMOVE, NULL);
             }
         } else if (id == IDC_TOGGLE_UPD) {
             if (zg_checkupdates_set(on))
-                ui_log(ZLOG_OK, on ? L"Автопроверка обновлений включена"
-                                   : L"Автопроверка обновлений выключена");
+                ui_log(ZLOG_OK, L"%s", zg_str(on ? S_LOG_UPD_ON : S_LOG_UPD_OFF));
             else
-                ui_log(ZLOG_ERR, L"Не удалось изменить настройку автообновлений");
+                ui_log(ZLOG_ERR, L"%s", zg_str(S_LOG_UPD_ERR));
         }
         return 0;
     }
@@ -1100,33 +1474,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         int idx = (int)lp;
         if (id == IDC_COMBO_STRAT) {
             if (idx >= 0 && idx < g_stratCount) {
-                settings_save(g_strats[idx]);
-                ui_log(ZLOG_INFO, L"Стратегия выбрана: %s", g_strats[idx]);
+                settings_save();
+                ui_log(ZLOG_INFO, zg_str(S_LOG_STRAT_SEL), g_strats[idx]);
                 if (g_st.winws_running)
-                    ui_log(ZLOG_WARN, L"Для применения перезапустите обход");
+                    ui_log(ZLOG_WARN, L"%s", zg_str(S_LOG_RESTART_HINT));
             }
         } else if (id == IDC_COMBO_GAME) {
             if (idx >= 0 && idx < 4) {
                 if (zg_gamefilter_set(GAME_MODES[idx]))
-                    ui_log(ZLOG_OK, L"Игровой фильтр: %s", GAME_LABELS[idx]);
+                    ui_log(ZLOG_OK, zg_str(S_LOG_GAME_SET), zg_game_labels()[idx]);
                 else
-                    ui_log(ZLOG_ERR, L"Не удалось изменить игровой фильтр");
-                ui_log(ZLOG_WARN, L"Перезапустите обход, чтобы применить изменения");
+                    ui_log(ZLOG_ERR, L"%s", zg_str(S_LOG_GAME_ERR));
+                ui_log(ZLOG_WARN, L"%s", zg_str(S_LOG_RESTART_HINT2));
             }
         } else if (id == IDC_COMBO_IPSET) {
             if (idx >= 0 && idx < 3) {
                 if (zg_ipset_set(IPSET_MODES[idx])) {
-                    ui_log(ZLOG_OK, L"Фильтр IPSet: %s", IPSET_LABELS[idx]);
+                    ui_log(ZLOG_OK, zg_str(S_LOG_IPSET_SET), zg_ipset_labels()[idx]);
                 } else {
-                    ui_log(ZLOG_ERR,
-                        L"Не удалось переключить IPSet: нет резервной копии списка. "
-                        L"Нажмите «Обновить IPSet»");
+                    ui_log(ZLOG_ERR, L"%s", zg_str(S_LOG_IPSET_ERR));
                     /* revert combo to actual state */
                     int im = zg_ipset_get(), ri = 0;
                     for (int i = 0; i < 3; i++) if (IPSET_MODES[i] == im) ri = i;
                     zg_combo_set_sel(g_hComboIpset, ri, FALSE);
                 }
-                ui_log(ZLOG_WARN, L"Перезапустите обход, чтобы применить изменения");
+                ui_log(ZLOG_WARN, L"%s", zg_str(S_LOG_RESTART_HINT2));
+            }
+        } else if (id == IDC_COMBO_LANG) {
+            if (idx >= 0 && idx < ZG_LANG_COUNT && idx != g_lang) {
+                zg_lang_set(idx);
+                update_ui_language();
+            }
+        } else if (id == IDC_COMBO_THEME) {
+            if (idx >= 0 && idx < ZG_THEME_COUNT && idx != g_theme) {
+                apply_ui_theme(idx);
             }
         }
         return 0;
@@ -1145,13 +1526,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_busy = FALSE;
         set_controls_busy(FALSE);
         refresh_status(TRUE);
+        tray_update_tooltip();
         return 0;
     }
 
     case WM_DESTROY: {
         KillTimer(hwnd, ZG_TIMER_STATUS);
+        tray_remove();
         if (g_st.winws_running && g_st.own_child_alive)
-            ui_log(ZLOG_INFO, L"GUI закрыт — обход продолжает работать");
+            ui_log(ZLOG_INFO, L"%s", zg_str(S_LOG_GUI_CLOSED));
         PostQuitMessage(0);
         return 0;
     }
@@ -1160,10 +1543,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 }
 
 /* ================================================================== */
-/* WinMain                                                             */
+/* WinMain                                                              */
 /* ================================================================== */
 
-static void enable_dark_titlebar(HWND hwnd)
+static void enable_dark_titlebar(HWND hwnd, BOOL dark)
 {
     typedef HRESULT (WINAPI *FN_SetAttr)(HWND, DWORD, LPCVOID, DWORD);
     HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
@@ -1171,18 +1554,20 @@ static void enable_dark_titlebar(HWND hwnd)
     FN_SetAttr f = (FN_SetAttr)(void*)GetProcAddress(hDwm, "DwmSetWindowAttribute");
     if (!f) { FreeLibrary(hDwm); return; }
 
-    BOOL dark = TRUE;
+    BOOL d = dark;
     /* DWMWA_USE_IMMERSIVE_DARK_MODE: 20 on Win10 2004+, 19 on older builds */
-    if (FAILED(f(hwnd, 20, &dark, sizeof(dark))))
-        f(hwnd, 19, &dark, sizeof(dark));
+    if (FAILED(f(hwnd, 20, &d, sizeof(d))))
+        f(hwnd, 19, &d, sizeof(d));
 
     /* rounded corners on Win11 */
     int pref = 2;  /* DWMWCP_ROUND */
     f(hwnd, 33, &pref, sizeof(pref));   /* DWMWA_WINDOW_CORNER_PREFERENCE */
 
     /* dark window border on Win11 (DWMWA_BORDER_COLOR = 34) */
-    COLORREF border = RGB(0x3E, 0x3E, 0x3E);
-    f(hwnd, 34, &border, sizeof(border));
+    if (dark) {
+        COLORREF border = RGB(0x3E, 0x3E, 0x3E);
+        f(hwnd, 34, &border, sizeof(border));
+    }
 
     FreeLibrary(hDwm);
 }
@@ -1191,8 +1576,28 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
 {
     (void)hPrev; (void)cmd;
 
+    /* single instance: a second launch restores the (maybe hidden) window
+     * instead of stacking a second tray icon */
+    HANDLE hSingle = CreateMutexW(NULL, FALSE, L"Local\\ZapretGUI.SingleInstance");
+    if (hSingle && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND ex = FindWindowW(ZG_WND_CLASS, NULL);
+        if (ex) {
+            ShowWindow(ex, IsIconic(ex) ? SW_RESTORE : SW_SHOW);
+            SetForegroundWindow(ex);
+        }
+        CloseHandle(hSingle);
+        return 0;
+    }
+
     /* COM for the IFileDialog folder picker */
     HRESULT com_hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
+    /* settings FIRST: language + theme must be active before any string /
+     * color is touched */
+    ZgGuiSettings st;
+    settings_load(&st);
+    zg_lang_set(st.language);
+    zg_theme_apply(st.theme);
 
     /* initial DPI — g_scale_pct is a PERCENT (100 = 96 dpi) */
     HDC dc = GetDC(NULL);
@@ -1211,6 +1616,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
 
     g_stratCount = zg_find_strategies(&g_strats);
 
+    g_msgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize        = sizeof(wc);
@@ -1225,32 +1632,47 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     wc.lpszClassName = ZG_WND_CLASS;
     RegisterClassExW(&wc);
 
-    /* pick remembered strategy */
-    wchar_t saved[MAX_PATH];
-    settings_load(saved, MAX_PATH);
-    int def_idx = 0;
-    if (saved[0]) {
-        for (int i = 0; i < g_stratCount; i++)
-            if (_wcsicmp(g_strats[i], saved) == 0) { def_idx = i; break; }
-    }
-
     /* window slightly larger than the 561x745 reference */
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     RECT wr = { 0, 0, SC(DU_WIN_W), SC(DU_WIN_H) };
     AdjustWindowRect(&wr, style, FALSE);
 
     HWND hwnd = CreateWindowExW(0, ZG_WND_CLASS,
-                                L"Zapret GUI — Discord и YouTube",
+                                zg_str(S_WINDOW_TITLE),
                                 style,
                                 CW_USEDEFAULT, CW_USEDEFAULT,
                                 wr.right - wr.left, wr.bottom - wr.top,
                                 NULL, NULL, hInst, NULL);
-    if (!hwnd) return 1;
+    if (!hwnd) {
+        if (g_strats) zg_free_strategies(g_strats, g_stratCount);
+        theme_destroy_fonts();
+        if (gdiplusToken) Gdiplus::GdiplusShutdown(gdiplusToken);
+        if (SUCCEEDED(com_hr)) CoUninitialize();
+        if (hSingle) CloseHandle(hSingle);
+        return 1;
+    }
 
-    /* apply remembered strategy selection */
+    /* tray state icons (fallback to the embedded .ico) */
+    g_icoTrayOn  = make_state_icon(TRUE);
+    g_icoTrayOff = make_state_icon(FALSE);
+    if (!g_icoTrayOn)
+        g_icoTrayOn = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                        GetSystemMetrics(SM_CXSMICON),
+                                        GetSystemMetrics(SM_CYSMICON), 0);
+    if (!g_icoTrayOff)
+        g_icoTrayOff = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                         GetSystemMetrics(SM_CXSMICON),
+                                         GetSystemMetrics(SM_CYSMICON), 0);
+
+    /* pick remembered strategy */
+    int def_idx = 0;
+    if (st.strategy[0]) {
+        for (int i = 0; i < g_stratCount; i++)
+            if (_wcsicmp(g_strats[i], st.strategy) == 0) { def_idx = i; break; }
+    }
     zg_combo_set_sel(g_hComboStrat, g_stratCount > 0 ? def_idx : -1, FALSE);
 
-    enable_dark_titlebar(hwnd);
+    enable_dark_titlebar(hwnd, g_th.is_dark);
 
     zg_status_refresh(&g_st);
     refresh_status(TRUE);
@@ -1261,26 +1683,23 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     ShowWindow(hwnd, show);
     UpdateWindow(hwnd);
 
-    ui_log(ZLOG_INFO, L"Zapret GUI %s запущен (exe: %s)",
-           ZG_GUI_VERSION, g_paths.real_exe_dir);
+    ui_log(ZLOG_INFO, zg_str(S_LOG_STARTED), ZG_GUI_VERSION, g_paths.real_exe_dir);
     if (!g_paths.files_ok) {
-        ui_log(ZLOG_ERR, L"Рядом с ZapretGUI.exe нет bin\\winws.exe — папка zapret не найдена");
-        ui_log(ZLOG_INFO, L"Автопоиск проверил: %s", zg_search_report());
+        ui_log(ZLOG_ERR, L"%s", zg_str(S_LOG_NOFILES_ERR));
+        ui_log(ZLOG_INFO, zg_str(S_LOG_SEARCH_REPORT), zg_search_report());
         fix_zapret_folder_flow(hwnd);
     }
     else {
         if (g_paths.detect == ZG_DET_CONFIG)
-            ui_log(ZLOG_INFO, L"Используется сохранённая папка zapret: %s",
-                   g_paths.exe_dir);
+            ui_log(ZLOG_INFO, zg_str(S_LOG_DIR_CFG), g_paths.exe_dir);
         else if (g_paths.detect == ZG_DET_AUTO_PARENT)
-            ui_log(ZLOG_OK, L"Папка zapret найдена автоматически: %s",
-                   g_paths.exe_dir);
-        ui_log(ZLOG_INFO, L"Версия zapret: %s · найдено стратегий: %d",
-               g_st.local_version, g_stratCount);
+            ui_log(ZLOG_OK, zg_str(S_LOG_DIR_AUTO), g_paths.exe_dir);
+        ui_log(ZLOG_INFO, zg_str(S_LOG_VER_STRATS), g_st.local_version, g_stratCount);
         if (g_stratCount > 0)
-            ui_log(ZLOG_INFO, L"Текущая стратегия: %s",
+            ui_log(ZLOG_INFO, zg_str(S_LOG_CUR_STRAT),
                    g_strats[zg_combo_get_sel(g_hComboStrat)]);
     }
+    ui_log(ZLOG_OK, zg_str(S_LOG_THEME_SET), theme_display_name(g_theme));
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
@@ -1289,8 +1708,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR cmd, int show)
     }
 
     if (g_strats) zg_free_strategies(g_strats, g_stratCount);
+    tray_remove();
+    if (g_icoTrayOn)  { DestroyIcon(g_icoTrayOn);  g_icoTrayOn  = NULL; }
+    if (g_icoTrayOff) { DestroyIcon(g_icoTrayOff); g_icoTrayOff = NULL; }
     theme_destroy_fonts();
     if (gdiplusToken) Gdiplus::GdiplusShutdown(gdiplusToken);
     if (SUCCEEDED(com_hr)) CoUninitialize();
+    if (hSingle) { ReleaseMutex(hSingle); CloseHandle(hSingle); }
     return (int)msg.wParam;
 }

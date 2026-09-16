@@ -37,5 +37,6 @@ HWND zg_combo_create(HWND parent, int id, const wchar_t* const* items, int count
 int  zg_combo_get_sel(HWND h);
 void zg_combo_set_sel(HWND h, int idx, BOOL notify_parent);
 void zg_combo_close_popup(HWND h);
+BOOL zg_combo_set_items(HWND h, const wchar_t* const* items, int count, int selected);
 
 #endif /* ZG_CONTROLS_H */

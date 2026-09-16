@@ -1,13 +1,22 @@
 /*
  * Zapret GUI — controls.cpp
- * Implementation of custom-drawn dark-theme controls (GDI+ for
- * anti-aliased rounded shapes and gradients).
+ * Implementation of custom-drawn controls (GDI+ for anti-aliased
+ * rounded shapes and gradients):
+ *   - ZgButton  : glossy chrome pill (primary) / chrome bar (flat) / link
+ *   - ZgToggle  : iOS-style switch with chrome thumb
+ *   - ZgCombo   : dropdown with styled chrome popup list
+ *
+ * Painting discipline: WM_PAINT runs a scoped Gdiplus::Graphics phase
+ * (all shapes) and resets the cached common DC state before/after it,
+ * then draws GDI text — the two APIs are never interleaved on one DC.
  */
 #include <windows.h>
 #include <windowsx.h>
 #include <stdio.h>
 #include "common.h"
+#include "theme.h"
 #include "controls.h"
+#include "uidraw.h"
 
 #include <gdiplus.h>
 
@@ -25,17 +34,17 @@ static void track_mouse_leave(HWND hwnd)
     TrackMouseEvent(&tme);
 }
 
-static Gdiplus::GraphicsPath* round_rect_path(int x, int y, int w, int h, int r)
+/* per-channel brightness shift with clamping */
+static COLORREF col_shift(COLORREF c, int d)
 {
-    Gdiplus::GraphicsPath* p = new Gdiplus::GraphicsPath();
-    int d = r * 2;
-    if (r <= 0) { p->AddRectangle(Gdiplus::Rect(x, y, w, h)); return p; }
-    p->AddArc(x,     y,     d, d, 180, 90);
-    p->AddArc(x+w-d, y,     d, d, 270, 90);
-    p->AddArc(x+w-d, y+h-d, d, d,   0, 90);
-    p->AddArc(x,     y+h-d, d, d,  90, 90);
-    p->CloseFigure();
-    return p;
+    int r = GetRValue(c) + d, g = GetGValue(c) + d, b = GetBValue(c) + d;
+    if (r < 0)   r = 0;
+    if (r > 255) r = 255;
+    if (g < 0)   g = 0;
+    if (g > 255) g = 255;
+    if (b < 0)   b = 0;
+    if (b > 255) b = 255;
+    return RGB(r, g, b);
 }
 
 /* ================================================================== */
@@ -59,6 +68,7 @@ struct ZgTglState {
 
 struct ZgCmbState {
     int          count;
+    int          capacity;
     int          selected;
     int          popup_scroll;
     int          hover_item;
@@ -133,65 +143,43 @@ static LRESULT CALLBACK ZgButtonProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
 
-        if (self->style == ZGBTN_PRIMARY) {
-            /* phase A: GDI+ shapes (scoped Graphics) */
-            {
-                Gdiplus::Graphics g(hdc);
-                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-                Gdiplus::GraphicsPath* path = round_rect_path(0, 0, w - 1, h - 1, h / 2);
-                Gdiplus::Color c1, c2;
-                if (self->scheme == ZGBP_GREEN) {
-                    if (self->pressed)       { c1 = Gdiplus::Color(255, 0x1E, 0x7A, 0x2E); c2 = Gdiplus::Color(255, 0x24, 0x8F, 0x37); }
-                    else if (self->hovering) { c1 = Gdiplus::Color(255, 0x2F, 0xB0, 0x44); c2 = Gdiplus::Color(255, 0x39, 0xC4, 0x4F); }
-                    else                     { c1 = Gdiplus::Color(255, 0x2A, 0xA0, 0x3A); c2 = Gdiplus::Color(255, 0x32, 0xC0, 0x50); }
-                } else {
-                    if (self->pressed)       { c1 = Gdiplus::Color(255, 0x5E, 0x4E, 0xC0); c2 = Gdiplus::Color(255, 0xD8, 0x50, 0x38); }
-                    else if (self->hovering) { c1 = Gdiplus::Color(255, 0x8F, 0x7C, 0xFF); c2 = Gdiplus::Color(255, 0xFF, 0x7E, 0x5E); }
-                    else                     { c1 = Gdiplus::Color(255, 0x7B, 0x68, 0xEE); c2 = Gdiplus::Color(255, 0xFF, 0x63, 0x47); }
-                }
-                Gdiplus::LinearGradientBrush br(Gdiplus::Point(0, 0), Gdiplus::Point(w, 0), c1, c2);
-                g.FillPath(&br, path);
-                if (self->disabled) {
-                    Gdiplus::SolidBrush dim(Gdiplus::Color(150, 0x20, 0x20, 0x20));
-                    g.FillPath(&dim, path);
-                }
-                delete path;
-            }
+        /* body rect (inside the shadow fringe) + pressed offset */
+        RECT b;
+        zg_ctrl_body(0, 0, w, h, &b);
+        int dy = self->pressed ? 1 : 0;
 
-            /* phase B: GDI text */
+        int state = self->disabled ? ZGST_DISABLED
+                  : self->pressed  ? ZGST_PRESSED
+                  : self->hovering ? ZGST_HOVER
+                  : ZGST_NORMAL;
+
+        /* phase A: GDI+ chrome (scoped Graphics) */
+        {
+            Gdiplus::Graphics g(hdc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            zg_draw_button(g, 0, 0, w, h, self->style, self->scheme, state);
+        }
+
+        /* phase B: GDI text */
+        if (self->style == ZGBTN_PRIMARY) {
             LOGFONTW lf; GetObjectW(g_font_btn, sizeof(lf), &lf);
             lf.lfWeight = FW_SEMIBOLD;
             HFONT fb = CreateFontIndirectW(&lf);
             HFONT of = (HFONT)SelectObject(hdc, fb);
             SetTextColor(hdc, self->disabled ? RGB(0xCC,0xCC,0xCC) : RGB(255,255,255));
-            RECT tr = { 0, 0, w, h };
+            RECT tr = { b.left, b.top + dy, b.right, b.bottom + dy };
             DrawTextW(hdc, self->text, -1, &tr,
                       DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
             SelectObject(hdc, of);
             DeleteObject(fb);
-            EndPaint(hwnd, &ps);
-            return 0;
+        } else {
+            HFONT of = (HFONT)SelectObject(hdc, self->disabled ? g_font_body : g_font_btn);
+            SetTextColor(hdc, self->disabled ? COL_MUTED2 : COL_TEXT);
+            RECT tr = { b.left, b.top + dy, b.right, b.bottom + dy };
+            DrawTextW(hdc, self->text, -1, &tr,
+                      DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+            SelectObject(hdc, of);
         }
-
-        /* flat */
-        {
-            Gdiplus::Graphics g(hdc);
-            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            Gdiplus::GraphicsPath* path = round_rect_path(0, 0, w - 1, h - 1, SC(8));
-            Gdiplus::SolidBrush brFill(self->pressed ? COL_PANEL_DOWN
-                                       : self->hovering ? COL_PANEL_HOVER : COL_PANEL);
-            g.FillPath(&brFill, path);
-            Gdiplus::Pen penBorder(Gdiplus::Color(zg_argb(self->disabled ? 120 : 230, COL_BORDER)));
-            g.DrawPath(&penBorder, path);
-            delete path;
-        }
-
-        HFONT of = (HFONT)SelectObject(hdc, self->disabled ? g_font_body : g_font_btn);
-        SetTextColor(hdc, self->disabled ? COL_MUTED2 : COL_TEXT);
-        RECT tr = { 0, 0, w, h };
-        DrawTextW(hdc, self->text, -1, &tr,
-                  DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
-        SelectObject(hdc, of);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -277,7 +265,10 @@ static LRESULT CALLBACK ZgToggleProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc; GetClientRect(hwnd, &rc);
         int w = rc.right, h = rc.bottom;
-        int r = h / 2;
+        int pad = SC(2);
+        if (h < 2 * pad + 6) pad = 0;
+        int tw = w - 2 * pad, th = h - 2 * pad;   /* track */
+        int r = th / 2;
 
         /* reset any GDI+ leftovers on the cached common DC */
         SetGraphicsMode(hdc, GM_COMPATIBLE);
@@ -285,27 +276,70 @@ static LRESULT CALLBACK ZgToggleProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         Gdiplus::Graphics g(hdc);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
-        Gdiplus::Color track;
-        if (self->on)
-            track = Gdiplus::Color(self->disabled ? 140 : 255, 0x32, 0xCD, 0x32);
-        else
-            track = Gdiplus::Color(self->disabled ? 120 : 255, 0x55, 0x55, 0x55);
-        if (self->hovering && !self->disabled)
-            track = self->on ? Gdiplus::Color(255, 0x4A, 0xE0, 0x4A)
-                             : Gdiplus::Color(255, 0x66, 0x66, 0x66);
+        Gdiplus::GraphicsPath* track = zg_round_path(pad, pad, tw - 1, th - 1, r);
 
-        Gdiplus::GraphicsPath* p = round_rect_path(0, 0, w - 1, h - 1, r);
-        Gdiplus::SolidBrush br(track);
-        g.FillPath(&br, p);
-        delete p;
+        /* track body: vertical gradient + inner shadow (concave) */
+        {
+            COLORREF c1, c2;
+            if (self->on) {
+                c1 = self->disabled ? col_shift(g_th.green, -30) : g_th.green_hover;
+                c2 = self->disabled ? col_shift(g_th.green, -60) : g_th.green;
+                if (self->hovering && !self->disabled) { c1 = col_shift(c1, 14); c2 = col_shift(c2, 6); }
+            } else {
+                c1 = self->disabled ? col_shift(g_th.toggle_off, -20) : col_shift(g_th.toggle_off, 22);
+                c2 = self->disabled ? col_shift(g_th.toggle_off, -35) : col_shift(g_th.toggle_off, -25);
+                if (self->hovering && !self->disabled) c1 = col_shift(c1, 14);
+            }
+            Gdiplus::LinearGradientBrush tb(Gdiplus::Point(pad, pad),
+                                            Gdiplus::Point(pad, pad + th),
+                                            Gdiplus::Color(zg_argb(255, c1)),
+                                            Gdiplus::Color(zg_argb(255, c2)));
+            g.FillPath(&tb, track);
 
-        int thumb_d = h - SC(8);
-        int tx = self->on ? w - thumb_d - SC(4) : SC(4);
-        int ty = (h - thumb_d) / 2;
-        Gdiplus::SolidBrush tb(self->disabled ? Gdiplus::Color(255, 0xB8, 0xB8, 0xB8)
-                                               : Gdiplus::Color(255, 255, 255, 255));
-        g.FillEllipse(&tb, tx, ty, thumb_d, thumb_d);
+            /* inner top shadow — sunken groove */
+            Gdiplus::LinearGradientBrush ish(Gdiplus::Point(pad, pad),
+                                             Gdiplus::Point(pad, pad + th / 2),
+                                             Gdiplus::Color(g_th.is_dark ? 70 : 40, 0, 0, 0),
+                                             Gdiplus::Color(0, 0, 0, 0));
+            ish.SetWrapMode(Gdiplus::WrapModeClamp);
+            g.FillPath(&ish, track);
 
+            Gdiplus::Pen rim(Gdiplus::Color(zg_argb(self->disabled ? 120 : 210, g_th.border)), 1.0f);
+            g.DrawPath(&rim, track);
+        }
+
+        /* chrome thumb with a drop shadow */
+        {
+            int thumb_d = th - SC(8);
+            if (thumb_d < 4) thumb_d = 4;
+            int tx = self->on ? pad + tw - 1 - thumb_d - SC(3) : pad + SC(3);
+            int ty = pad + (th - 1 - thumb_d) / 2;
+
+            /* shadow under the thumb */
+            Gdiplus::SolidBrush shb(Gdiplus::Color(g_th.is_dark ? 70 : 45, 0, 0, 0));
+            g.FillEllipse(&shb, tx + 1, ty + 2, thumb_d, thumb_d);
+
+            /* ball: white -> steel gradient */
+            Gdiplus::GraphicsPath* ball = new Gdiplus::GraphicsPath();
+            ball->AddEllipse(tx, ty, thumb_d, thumb_d);
+            Gdiplus::LinearGradientBrush bb(Gdiplus::Point(tx, ty),
+                                             Gdiplus::Point(tx, ty + thumb_d),
+                                             Gdiplus::Color(255, 255, 255, 255),
+                                             Gdiplus::Color(255, 0xD5, 0xDA, 0xE2));
+            g.FillPath(&bb, ball);
+            Gdiplus::Pen ring(Gdiplus::Color(160, 0x60, 0x66, 0x70), 1.0f);
+            g.DrawPath(&ring, ball);
+            delete ball;
+
+            /* tiny specular dot */
+            int sd = thumb_d / 3;
+            if (sd > 2) {
+                Gdiplus::SolidBrush spec(Gdiplus::Color(140, 255, 255, 255));
+                g.FillEllipse(&spec, tx + thumb_d / 5, ty + thumb_d / 6, sd, sd);
+            }
+        }
+
+        delete track;
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -353,7 +387,8 @@ void zg_toggle_set_disabled(HWND h, BOOL dis)
 /* ZgCombo                                                             */
 /* ================================================================== */
 
-#define ZG_COMBO_ROW 30
+#define ZG_COMBO_ROW   30
+#define ZG_COMBO_FRAME 4   /* chrome margin around the popup list */
 
 static LRESULT CALLBACK ZgComboPopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
@@ -365,13 +400,16 @@ static void combo_open_popup(HWND hCombo)
     RECT rc; GetWindowRect(hCombo, &rc);
     int vis = self->count < ZG_COMBO_MAXVIS ? self->count : ZG_COMBO_MAXVIS;
     int w = rc.right - rc.left;
+    int m = SC(ZG_COMBO_FRAME);
+    /* body size (matches the closed control), window adds the chrome margin */
     int h = vis * SC(ZG_COMBO_ROW) + 2 * SC(4) + 2;
 
     self->hover_item = -1;
     self->hpopup = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                                   L"ZgComboPopup", NULL,
                                   WS_POPUP | WS_VISIBLE,
-                                  rc.left, rc.bottom + SC(6), w, h,
+                                  rc.left - m, rc.bottom + SC(6) - m,
+                                  w + 2 * m, h + 2 * m,
                                   GetParent(hCombo), NULL, NULL, (LPVOID)hCombo);
     if (!self->hpopup) return;
     self->open = TRUE;
@@ -398,6 +436,22 @@ void zg_combo_close_popup(HWND hCombo)
     InvalidateRect(hCombo, NULL, TRUE);
 }
 
+/* replace the item list (same or smaller count than allocated) */
+BOOL zg_combo_set_items(HWND hCombo, const wchar_t* const* items, int count, int selected)
+{
+    ZgCmbState* self = (ZgCmbState*)GetWindowLongPtrW(hCombo, GWLP_USERDATA);
+    if (!self || !items) return FALSE;
+    if (count <= 0 || count > self->capacity) return FALSE;
+    for (int i = 0; i < count; i++) {
+        wcsncpy(self->items[i], items[i], 47);
+        self->items[i][47] = 0;
+    }
+    self->count = count;
+    self->selected = (selected >= 0 && selected < count) ? selected : -1;
+    InvalidateRect(hCombo, NULL, TRUE);
+    return TRUE;
+}
+
 static LRESULT CALLBACK ZgComboProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     ZgCmbState* self = (ZgCmbState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -408,11 +462,13 @@ static LRESULT CALLBACK ZgComboProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         CREATESTRUCTW* cs = (CREATESTRUCTW*)lp;
         ComboInit* ci = (ComboInit*)cs->lpCreateParams;
         int cnt = ci ? ci->count : 0;
+        if (cnt < 0) cnt = 0;
         self = (ZgCmbState*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                       sizeof(ZgCmbState) + (size_t)(cnt > 0 ? cnt : 1) * 48 * sizeof(wchar_t));
         if (!self) return -1;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)self);
         self->count = cnt;
+        self->capacity = cnt;
         self->selected = ci ? ci->selected : -1;
         self->items = (wchar_t (*)[48])(((BYTE*)self) + sizeof(ZgCmbState));
         for (int i = 0; i < cnt && ci; i++) {
@@ -436,34 +492,32 @@ static LRESULT CALLBACK ZgComboProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetGraphicsMode(hdc, GM_COMPATIBLE);
 
         BOOL hovering = (GetCapture() == hwnd);
-        COLORREF fill = hovering ? COL_PANEL_HOVER : COL_PANEL;
 
-        /* phase A: GDI+ panel (scoped Graphics) */
+        /* phase A: GDI+ chrome panel (scoped Graphics) */
         {
             Gdiplus::Graphics g(hdc);
             g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            Gdiplus::GraphicsPath* path = round_rect_path(0, 0, w - 1, h - 1, SC(8));
-            Gdiplus::SolidBrush brFill(fill);
-            g.FillPath(&brFill, path);
-            Gdiplus::Pen penBorder(Gdiplus::Color(zg_argb(230, COL_BORDER)));
-            g.DrawPath(&penBorder, path);
-            delete path;
+            int state = hovering ? ZGST_HOVER : ZGST_NORMAL;
+            zg_draw_button(g, 0, 0, w, h, ZGBTN_FLAT, 0, state);
         }
 
-        /* phase B: GDI text + chevron */
+        /* phase B: GDI text + chevron (inside the body rect) */
+        RECT b;
+        zg_ctrl_body(0, 0, w, h, &b);
+
         SetBkMode(hdc, TRANSPARENT);
         HFONT of = (HFONT)SelectObject(hdc, g_font_body);
         SetTextColor(hdc, COL_TEXT);
-        RECT tr = { SC(12), 0, w - SC(30), h };
+        RECT tr = { b.left + SC(12), b.top, b.right - SC(28), b.bottom };
         DrawTextW(hdc, self->selected >= 0 ? self->items[self->selected] : L"",
                   -1, &tr, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
         SelectObject(hdc, of);
 
         /* chevron */
-        int cx = w - SC(17), cy = h / 2, s = SC(4);
+        int cx = b.right - SC(16), cy = (b.top + b.bottom) / 2, s = SC(4);
         POINT pts[3] = { { cx - s, cy - s/2 }, { cx + s, cy - s/2 }, { cx, cy + s/2 } };
         HPEN pen = CreatePen(PS_SOLID, 1, COL_MUTED);
-        HBRUSH br = CreateSolidBrush(COL_MUTED);
+        HBRUSH br = CreateSolidBrush(hovering ? COL_TEXT : COL_MUTED);
         HPEN ofp = (HPEN)SelectObject(hdc, pen);
         HBRUSH ofb = (HBRUSH)SelectObject(hdc, br);
         Polygon(hdc, pts, 3);
@@ -542,62 +596,64 @@ static LRESULT CALLBACK ZgComboPopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
         /* reset any GDI+ leftovers on the cached common DC */
         SetGraphicsMode(hdc, GM_COMPATIBLE);
 
-        HBRUSH bg = CreateSolidBrush(COL_PANEL);
-        RECT full = { 0, 0, w, h };
-        FillRect(hdc, &full, bg);
-        DeleteObject(bg);
+        int m = SC(ZG_COMBO_FRAME);
+        int bw = w - 2 * m, bh = h - 2 * m;   /* body inside the margin */
 
+        /* phase A: chrome shell */
+        {
+            Gdiplus::Graphics g(hdc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            zg_draw_shadow(g, m, m, bw, bh, SC(8), SC(3), 110);
+            zg_draw_chrome_panel(g, m, m, bw, bh, SC(8),
+                                 g_th.card_top, g_th.card_bot, g_th.border, 0);
+        }
+
+        /* phase B: rows (GDI) */
         SetBkMode(hdc, TRANSPARENT);
         int rowh = SC(ZG_COMBO_ROW);
         int pad = SC(4);
+        int vw = bw - 2 * pad;   /* row width inside the body */
 
         for (int i = 0; i < self->count; i++) {
             int row_idx = i - self->popup_scroll;
             if (row_idx < 0 || row_idx >= ZG_COMBO_MAXVIS) continue;
-            int y = pad + row_idx * rowh;
+            int y = m + pad + row_idx * rowh;
             BOOL hovered = (self->hover_item == i);
             BOOL selected = (self->selected == i);
 
             if (selected) {
                 HBRUSH sb = CreateSolidBrush(COL_PANEL_HOVER);
-                RECT sr = { SC(2), y, w - SC(2), y + rowh };
+                RECT sr = { m + pad, y, m + pad + vw, y + rowh };
                 FillRect(hdc, &sr, sb);
                 DeleteObject(sb);
                 HBRUSH ab = CreateSolidBrush(COL_GREEN);
-                RECT abr = { 0, y + SC(7), SC(3), y + rowh - SC(7) };
+                RECT abr = { m + pad, y + SC(7), m + pad + SC(3), y + rowh - SC(7) };
                 FillRect(hdc, &abr, ab);
                 DeleteObject(ab);
             } else if (hovered) {
-                HBRUSH hb = CreateSolidBrush(RGB(0x35, 0x35, 0x35));
-                RECT hr2 = { SC(2), y, w - SC(2), y + rowh };
+                HBRUSH hb = CreateSolidBrush(g_th.popup_hover);
+                RECT hr2 = { m + pad, y, m + pad + vw, y + rowh };
                 FillRect(hdc, &hr2, hb);
                 DeleteObject(hb);
             }
 
             HFONT of = (HFONT)SelectObject(hdc, selected ? g_font_body_b : g_font_body);
             SetTextColor(hdc, COL_TEXT);
-            RECT tr = { SC(14), y, w - SC(8), y + rowh };
+            RECT tr = { m + pad + SC(10), y, m + pad + vw - SC(6), y + rowh };
             DrawTextW(hdc, self->items[i], -1, &tr,
                       DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
             SelectObject(hdc, of);
         }
 
-        HPEN pen = CreatePen(PS_SOLID, 1, COL_BORDER);
-        HPEN ofp = (HPEN)SelectObject(hdc, pen);
-        HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
-        HBRUSH ofb = (HBRUSH)SelectObject(hdc, nb);
-        Rectangle(hdc, 0, 0, w, h);
-        SelectObject(hdc, ofp); SelectObject(hdc, ofb);
-        DeleteObject(pen);
-
+        /* scrollbar */
         int vis = self->count < ZG_COMBO_MAXVIS ? self->count : ZG_COMBO_MAXVIS;
         if (self->count > vis) {
-            int track_y0 = pad, track_y1 = h - pad;
+            int track_y0 = m + pad, track_y1 = h - m - pad;
             int thumb_h = (track_y1 - track_y0) * vis / self->count;
             int thumb_y = track_y0 + (track_y1 - track_y0 - thumb_h)
                           * self->popup_scroll / (self->count - vis);
             HBRUSH tb = CreateSolidBrush(COL_GRAY_DIM);
-            RECT tbr = { w - SC(5), thumb_y, w - SC(1), thumb_y + thumb_h };
+            RECT tbr = { w - m - SC(4), thumb_y, w - m - SC(1), thumb_y + thumb_h };
             FillRect(hdc, &tbr, tb);
             DeleteObject(tb);
         }
@@ -610,9 +666,10 @@ static LRESULT CALLBACK ZgComboPopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
         if (!self) break;
         POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int rowh = SC(ZG_COMBO_ROW);
+        int m = SC(ZG_COMBO_FRAME);
         int vis = self->count < ZG_COMBO_MAXVIS ? self->count : ZG_COMBO_MAXVIS;
         int idx = -1;
-        int r = (pt.y - SC(4)) / rowh;
+        int r = (pt.y - m - SC(4)) / rowh;
         if (r >= 0 && r < vis) {
             idx = self->popup_scroll + r;
             if (idx >= self->count) idx = -1;
@@ -648,8 +705,9 @@ static LRESULT CALLBACK ZgComboPopupProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
             return 0;
         }
         int rowh = SC(ZG_COMBO_ROW);
+        int m = SC(ZG_COMBO_FRAME);
         int vis = self->count < ZG_COMBO_MAXVIS ? self->count : ZG_COMBO_MAXVIS;
-        int r = (pt.y - SC(4)) / rowh;
+        int r = (pt.y - m - SC(4)) / rowh;
         if (r >= 0 && r < vis) {
             int idx = self->popup_scroll + r;
             if (idx >= 0 && idx < self->count)

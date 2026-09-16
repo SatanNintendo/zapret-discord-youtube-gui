@@ -13,6 +13,7 @@
 #include "common.h"
 #include "zapret.h"
 #include "netops.h"
+#include "lang.h"
 
 #define UPSTREAM_BASE  L"raw.githubusercontent.com"
 #define UPSTREAM_REPO  L"/Flowseal/zapret-discord-youtube/refs/heads/main/"
@@ -49,10 +50,24 @@ static char* http_get(const wchar_t* path, DWORD* out_size, DWORD* out_status)
     *out_size = 0;
     *out_status = 0;
 
-    HINTERNET hSession = WinHttpOpen(L"ZapretGUI/1.0",
+    HINTERNET hSession = WinHttpOpen(L"ZapretGUI/1.1",
                                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSession) return NULL;
+
+    /*
+     * Windows 7 SP1 ships TLS 1.2 in Schannel but does NOT enable it for
+     * WinHTTP by default (GitHub requires TLS >= 1.2). Explicitly allowing
+     * the modern protocols mirrors the DefaultSecureProtocols hotfix.
+     */
+    {
+        DWORD prot = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_1
+                   | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+#ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+        prot |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+#endif
+        WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &prot, sizeof(prot));
+    }
 
     /* TLS + redirects */
     DWORD flags = WINHTTP_FLAG_SECURE;
@@ -116,7 +131,7 @@ static char* http_get(const wchar_t* path, DWORD* out_size, DWORD* out_status)
 
 void zg_net_version_check(void)
 {
-    zg_log_from_worker(ZLOG_INFO, L"Проверка обновлений zapret…");
+    zg_log_from_worker(ZLOG_INFO, L"%s", zg_str(S_NET_CHECK_VER));
 
     const wchar_t* ver_c = zg_local_version();
     wchar_t ver[32];
@@ -126,8 +141,7 @@ void zg_net_version_check(void)
     DWORD size = 0, status = 0;
     char* resp = http_get(UPSTREAM_REPO L".service/version.txt", &size, &status);
     if (!resp || status != 200 || size == 0) {
-        zg_log_from_worker(ZLOG_WARN,
-            L"Не удалось получить версию из репозитория (проверка пропущена)");
+        zg_log_from_worker(ZLOG_WARN, L"%s", zg_str(S_NET_VER_FAIL));
         if (resp) HeapFree(GetProcessHeap(), 0, resp);
         return;
     }
@@ -142,11 +156,9 @@ void zg_net_version_check(void)
     HeapFree(GetProcessHeap(), 0, resp);
 
     if (wcscmp(ver, remote) == 0) {
-        zg_log_from_worker(ZLOG_OK, L"Установлена последняя версия: %s", ver);
+        zg_log_from_worker(ZLOG_OK, zg_str(S_NET_VER_LATEST), ver);
     } else {
-        zg_log_from_worker(ZLOG_WARN,
-            L"Доступна новая версия: %s (установлена %s). Открываю страницу релиза…",
-            remote, ver);
+        zg_log_from_worker(ZLOG_WARN, zg_str(S_NET_VER_NEW), remote, ver);
         ShellExecuteW(NULL, L"open", RELEASES_URL, NULL, NULL, SW_SHOWNORMAL);
     }
 }
@@ -157,13 +169,12 @@ void zg_net_version_check(void)
 
 void zg_net_ipset_update(void)
 {
-    zg_log_from_worker(ZLOG_INFO, L"Обновление списка IPSet…");
+    zg_log_from_worker(ZLOG_INFO, L"%s", zg_str(S_NET_IPSET_UPD));
 
     DWORD size = 0, status = 0;
     char* resp = http_get(UPSTREAM_REPO L".service/ipset-service.txt", &size, &status);
     if (!resp || status != 200 || size == 0) {
-        zg_log_from_worker(ZLOG_ERR,
-            L"Не удалось скачать список IPSet (код %lu)", status);
+        zg_log_from_worker(ZLOG_ERR, zg_str(S_NET_IPSET_FAIL), status);
         if (resp) HeapFree(GetProcessHeap(), 0, resp);
         return;
     }
@@ -175,7 +186,7 @@ void zg_net_ipset_update(void)
     HANDLE h = CreateFileW(listp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
-        zg_log_from_worker(ZLOG_ERR, L"Не удалось записать lists\\ipset-all.txt");
+        zg_log_from_worker(ZLOG_ERR, L"%s", zg_str(S_NET_IPSET_WRITE));
         HeapFree(GetProcessHeap(), 0, resp);
         return;
     }
@@ -189,7 +200,7 @@ void zg_net_ipset_update(void)
         if (resp[i] == '\n') lines++;
     HeapFree(GetProcessHeap(), 0, resp);
 
-    zg_log_from_worker(ZLOG_OK, L"Список IPSet обновлён (%d строк, %lu байт)", lines, size);
+    zg_log_from_worker(ZLOG_OK, zg_str(S_NET_IPSET_OK), lines, size);
 }
 
 /* ================================================================== */
@@ -210,13 +221,12 @@ static const wchar_t* wcasestr(const wchar_t* hay, const wchar_t* needle)
 
 void zg_net_hosts_check(void)
 {
-    zg_log_from_worker(ZLOG_INFO, L"Проверка файла hosts…");
+    zg_log_from_worker(ZLOG_INFO, L"%s", zg_str(S_NET_HOSTS_CHECK));
 
     DWORD size = 0, status = 0;
     char* resp = http_get(UPSTREAM_REPO L".service/hosts", &size, &status);
     if (!resp || status != 200 || size == 0) {
-        zg_log_from_worker(ZLOG_ERR,
-            L"Не удалось скачать hosts из репозитория (код %lu)", status);
+        zg_log_from_worker(ZLOG_ERR, zg_str(S_NET_HOSTS_FAIL), status);
         if (resp) HeapFree(GetProcessHeap(), 0, resp);
         return;
     }
@@ -230,7 +240,7 @@ void zg_net_hosts_check(void)
     HANDLE h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
-        zg_log_from_worker(ZLOG_ERR, L"Не удалось создать временный файл");
+        zg_log_from_worker(ZLOG_ERR, L"%s", zg_str(S_NET_TMP_FAIL));
         HeapFree(GetProcessHeap(), 0, resp);
         return;
     }
@@ -276,16 +286,14 @@ void zg_net_hosts_check(void)
     wchar_t* sysh = zg_read_file_w(sysp, &n);
     if (!sysh) {
         needs_update = TRUE;
-        zg_log_from_worker(ZLOG_WARN, L"Не удалось прочитать системный hosts");
+        zg_log_from_worker(ZLOG_WARN, L"%s", zg_str(S_NET_HOSTS_READ));
     } else {
         if (first[0] && !wcasestr(sysh, first)) {
-            zg_log_from_worker(ZLOG_WARN,
-                L"Первая строка из репозитория не найдена в hosts");
+            zg_log_from_worker(ZLOG_WARN, L"%s", zg_str(S_NET_HOSTS_FIRST));
             needs_update = TRUE;
         }
         if (last[0] && !wcasestr(sysh, last)) {
-            zg_log_from_worker(ZLOG_WARN,
-                L"Последняя строка из репозитория не найдена в hosts");
+            zg_log_from_worker(ZLOG_WARN, L"%s", zg_str(S_NET_HOSTS_LAST));
             needs_update = TRUE;
         }
         HeapFree(GetProcessHeap(), 0, sysh);
@@ -294,10 +302,8 @@ void zg_net_hosts_check(void)
 
     if (needs_update) {
         zg_log_from_worker(ZLOG_TIME, L"—");
-        zg_log_from_worker(ZLOG_WARN,
-            L"Hosts требует обновления: скопируйте строки из открывшегося файла");
-        zg_log_from_worker(ZLOG_WARN,
-            L"в %ls (файл hosts — открыть от имени администратора)", sysp);
+        zg_log_from_worker(ZLOG_WARN, L"%s", zg_str(S_NET_HOSTS_UPDATE));
+        zg_log_from_worker(ZLOG_WARN, zg_str(S_NET_HOSTS_NOTE), sysp);
         zg_log_from_worker(ZLOG_TIME, L"—");
         /* open notepad + explorer like service.bat :hosts_update */
         ShellExecuteW(NULL, L"open", L"notepad.exe", tmp, NULL, SW_SHOWNORMAL);
@@ -313,7 +319,7 @@ void zg_net_hosts_check(void)
             ShellExecuteW(NULL, L"open", sysp, NULL, NULL, SW_SHOWNORMAL);
         }
     } else {
-        zg_log_from_worker(ZLOG_OK, L"Hosts актуален");
+        zg_log_from_worker(ZLOG_OK, L"%s", zg_str(S_NET_HOSTS_OK));
         DeleteFileW(tmp);
     }
 }

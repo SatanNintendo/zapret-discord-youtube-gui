@@ -16,6 +16,7 @@
 #include <shlobj.h>
 #include "common.h"
 #include "zapret.h"
+#include "lang.h"
 
 ZgPaths g_paths;
 
@@ -107,7 +108,7 @@ static void search_report_add(const wchar_t* dir)
 
 const wchar_t* zg_search_report(void)
 {
-    return g_search_report[0] ? g_search_report : L"(поиск не выполнялся)";
+    return g_search_report[0] ? g_search_report : zg_str(S_ERR_NO_SEARCH);
 }
 
 BOOL zg_dir_has_winws(const wchar_t* dir)
@@ -870,19 +871,18 @@ BOOL zg_launch_bypass(const wchar_t* strategy_name, wchar_t* err, size_t err_cap
 {
     err[0] = 0;
     if (!g_paths.files_ok) {
-        _snwprintf(err, err_cap, L"bin\\winws.exe не найден — укажите папку zapret (кнопка под статусом)");
+        _snwprintf(err, err_cap, L"%s", zg_str(S_ERR_NO_WINWS));
         return FALSE;
     }
 
     /* do not run alongside the service (matches general.bat :test_service) */
     ZgStatus st; zg_status_refresh(&st);
     if (st.svc_running) {
-        _snwprintf(err, err_cap,
-            L"Служба zapret уже запущена. Выключите её (тумблер «Автозапуск» или кнопка остановки), затем запускайте обход вручную");
+        _snwprintf(err, err_cap, L"%s", zg_str(S_ERR_SVC_RUNNING));
         return FALSE;
     }
     if (st.winws_running) {
-        _snwprintf(err, err_cap, L"winws.exe уже запущен — сначала остановите текущий обход");
+        _snwprintf(err, err_cap, L"%s", zg_str(S_ERR_WINWS_RUNNING));
         return FALSE;
     }
 
@@ -907,7 +907,7 @@ BOOL zg_launch_bypass(const wchar_t* strategy_name, wchar_t* err, size_t err_cap
 
     wchar_t args[16384];
     if (!zg_parse_strategy(strategy_name, args, 16384)) {
-        _snwprintf(err, err_cap, L"Не удалось разобрать файл стратегии %s", strategy_name);
+        _snwprintf(err, err_cap, zg_str(S_ERR_PARSE_STRAT), strategy_name);
         return FALSE;
     }
 
@@ -922,7 +922,7 @@ BOOL zg_launch_bypass(const wchar_t* strategy_name, wchar_t* err, size_t err_cap
     si.cb = sizeof(si);
     if (!CreateProcessW(NULL, cmdline, NULL, NULL, FALSE,
                         CREATE_NO_WINDOW, NULL, g_paths.bin_dir, &si, &pi)) {
-        _snwprintf(err, err_cap, L"Не удалось запустить winws.exe (код %lu)", GetLastError());
+        _snwprintf(err, err_cap, zg_str(S_ERR_LAUNCH_WINWS), GetLastError());
         return FALSE;
     }
     CloseHandle(pi.hThread);
@@ -975,13 +975,13 @@ BOOL zg_service_install(const wchar_t* strategy_name, wchar_t* err, size_t err_c
 {
     err[0] = 0;
     if (!g_paths.files_ok) {
-        _snwprintf(err, err_cap, L"bin\\winws.exe не найден (папка: %s)", g_paths.exe_dir);
+        _snwprintf(err, err_cap, zg_str(S_ERR_NO_WINWS_DIR), g_paths.exe_dir);
         return FALSE;
     }
 
     wchar_t args[16384];
     if (!zg_parse_strategy(strategy_name, args, 16384)) {
-        _snwprintf(err, err_cap, L"Не удалось разобрать файл стратегии %s", strategy_name);
+        _snwprintf(err, err_cap, zg_str(S_ERR_PARSE_STRAT), strategy_name);
         return FALSE;
     }
 
@@ -1019,7 +1019,7 @@ BOOL zg_service_install(const wchar_t* strategy_name, wchar_t* err, size_t err_c
 
     SC_HANDLE hScm = open_scm(SC_MANAGER_ALL_ACCESS);
     if (!hScm) {
-        _snwprintf(err, err_cap, L"Нет доступа к диспетчеру служб (код %lu)", GetLastError());
+        _snwprintf(err, err_cap, zg_str(S_ERR_SCM_ACCESS), GetLastError());
         return FALSE;
     }
 
@@ -1034,9 +1034,9 @@ BOOL zg_service_install(const wchar_t* strategy_name, wchar_t* err, size_t err_c
         DWORD e = GetLastError();
         CloseServiceHandle(hScm);
         if (e == ERROR_SERVICE_EXISTS) {
-            _snwprintf(err, err_cap, L"Служба zapret уже существует — сначала удалите её");
+            _snwprintf(err, err_cap, L"%s", zg_str(S_ERR_SVC_EXISTS));
         } else {
-            _snwprintf(err, err_cap, L"Не удалось создать службу (код %lu)", e);
+            _snwprintf(err, err_cap, zg_str(S_ERR_CREATE_SVC), e);
         }
         return FALSE;
     }
@@ -1052,7 +1052,7 @@ BOOL zg_service_install(const wchar_t* strategy_name, wchar_t* err, size_t err_c
             DeleteService(hSvc);
             CloseServiceHandle(hSvc);
             CloseServiceHandle(hScm);
-            _snwprintf(err, err_cap, L"Служба создана, но не запустилась (код %lu)", e);
+            _snwprintf(err, err_cap, zg_str(S_ERR_START_SVC), e);
             return FALSE;
         }
     }
