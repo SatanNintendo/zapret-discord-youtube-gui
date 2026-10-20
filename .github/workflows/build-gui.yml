@@ -70,7 +70,7 @@ jobs:
           print('binary string checks passed')
           EOF
 
-      - name: Package (ready-to-run folder: GUI + everything zapret needs)
+      - name: Package ready-to-run folder (GUI + everything zapret needs)
         run: |
           D=staging-compiled
           mkdir -p "$D"
