@@ -13,6 +13,7 @@
 #define ZGBTN_FLAT     0   /* #2D2D2D rounded rect, subtle border       */
 #define ZGBTN_PRIMARY  1   /* gradient pill, bold uppercase text       */
 #define ZGBTN_LINK     2   /* transparent text link (accent color)    */
+#define ZGBTN_GEAR     3   /* flat chrome square with a gear icon     */
 
 /* primary button color schemes */
 #define ZGBP_GREEN     0   /* "ВКЛЮЧИТЬ ОБХОД"                          */

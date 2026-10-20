@@ -56,8 +56,17 @@ void   zg_free_strategies(wchar_t** list, int count);
 BOOL   zg_parse_strategy(const wchar_t* bat_name, wchar_t* args, size_t args_cap);
 
 /* filters / settings persisted as files (like service.bat does) */
+#define ZG_GF_RANGE_MAX 96
+typedef struct {
+    int     mode;                    /* ZG_GAME_*                              */
+    wchar_t tcp[ZG_GF_RANGE_MAX];    /* validated ports/ranges, e.g. 1024-65535 */
+    wchar_t udp[ZG_GF_RANGE_MAX];
+} ZgGameFilter;
+void   zg_gamefilter_load(ZgGameFilter* gf);             /* new + legacy file format */
+BOOL   zg_gamefilter_save(const ZgGameFilter* gf);       /* writes mode=/tcp=/udp=   */
+BOOL   zg_gamefilter_range_ok(const wchar_t* in, wchar_t* out, size_t cap); /* validate + normalise */
 int    zg_gamefilter_get(void);                          /* ZG_GAME_*  */
-BOOL   zg_gamefilter_set(int mode);
+BOOL   zg_gamefilter_set(int mode);                      /* keeps port ranges */
 int    zg_ipset_get(void);                               /* ZG_IPSET_* */
 BOOL   zg_ipset_set(int mode);
 BOOL   zg_checkupdates_enabled(void);

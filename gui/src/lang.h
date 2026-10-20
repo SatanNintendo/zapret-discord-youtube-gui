@@ -175,6 +175,18 @@ enum {
     S_NET_HOSTS_NOTE,     /* %ls */
     S_NET_HOSTS_OK,
 
+    /* game filter port ranges (zapret 1.10.4) */
+    S_PORTS_TITLE,
+    S_PORTS_HINT,
+    S_PORTS_TCP,
+    S_PORTS_UDP,
+    S_PORTS_SAVE,
+    S_PORTS_CANCEL,
+    S_PORTS_RESET,
+    S_PORTS_BAD,          /* %s = field name */
+    S_LOG_PORTS_SET,      /* %s tcp, %s udp */
+    S_LOG_PORTS_ERR,
+
     ZG_STR_COUNT   /* must stay last */
 };
 

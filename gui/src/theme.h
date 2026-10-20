@@ -64,6 +64,15 @@ typedef struct {
     COLORREF card_top,   card_bot;     /* cards / popup            */
     COLORREF setp_top,   setp_bot;     /* settings panel           */
     BOOL     is_dark;                  /* dark titlebar / overlays */
+    /* glass / carbon surface (see gfx.cpp) */
+    COLORREF bg_g0,      bg_g1;        /* window gradient top / bottom      */
+    COLORREF glow_a,     glow_b;       /* ambient light blobs               */
+    int      glow_a_pct, glow_b_pct;   /* blob strength 0..100              */
+    COLORREF glass;                    /* glass tint                        */
+    int      glass_hi,   glass_lo;     /* tint alpha 0..255 top / bottom    */
+    int      glass_rim;                /* edge light alpha 0..255           */
+    int      glass_sheen;              /* diagonal reflection alpha 0..255  */
+    int      carbon;                   /* weave visibility in reflections 0..100 */
 } ZgTheme;
 
 extern ZgTheme g_th;
@@ -148,7 +157,10 @@ void zg_theme_apply(int id);
 #define DU_ROW0_Y       (DU_SET_Y + 6)
 #define DU_CTRL_H       32
 #define DU_COMBO_W      250     /* strategy (full row)                  */
-#define DU_COMBO_W2     164     /* game filter (left half)             */
+#define DU_COMBO_W2     128     /* game filter combo (left half)       */
+#define DU_GEAR_W       32      /* game filter ports button            */
+#define DU_GEAR_GAP     4
+#define DU_GAME_TOTAL   (DU_COMBO_W2 + DU_GEAR_GAP + DU_GEAR_W)   /* 164 */
 #define DU_COMBO_W2B    150     /* ipset (right half)                  */
 #define DU_COMBO_W3     120     /* language (left half)                */
 #define DU_COMBO_W3B    130     /* theme (right half)                  */

@@ -409,19 +409,23 @@ void zg_free_strategies(wchar_t** list, int count)
 
 static void expand_vars(wchar_t* tok, size_t cap)
 {
-    /* game filter ports */
-    int mode = zg_gamefilter_get();
+    /* game filter ports — same rules as service.bat :game_switch_status:
+     *   all -> TCP+UDP ranges, tcp -> TCP range (UDP = 12),
+     *   udp -> UDP range (TCP = 12), disabled -> 12 / 12              */
+    ZgGameFilter gf;
+    zg_gamefilter_load(&gf);
     const wchar_t* gf_tcp = L"12";
     const wchar_t* gf_udp = L"12";
-    if (mode == ZG_GAME_ALL)      { gf_tcp = L"1024-65535"; gf_udp = L"1024-65535"; }
-    else if (mode == ZG_GAME_TCP) { gf_tcp = L"1024-65535"; }
-    else if (mode == ZG_GAME_UDP) { gf_udp = L"1024-65535"; }
+    const wchar_t* gf_any = L"12";
+    if (gf.mode == ZG_GAME_ALL)      { gf_tcp = gf.tcp; gf_udp = gf.udp; gf_any = gf.tcp; }
+    else if (gf.mode == ZG_GAME_TCP) { gf_tcp = gf.tcp; gf_any = gf.tcp; }
+    else if (gf.mode == ZG_GAME_UDP) { gf_udp = gf.udp; gf_any = gf.udp; }
 
     wstr_replace_all(tok, cap, L"%BIN%", g_paths.bin_dir);
     wstr_replace_all(tok, cap, L"%LISTS%", g_paths.lists_dir);
     wstr_replace_all(tok, cap, L"%GameFilterTCP%", gf_tcp);
     wstr_replace_all(tok, cap, L"%GameFilterUDP%", gf_udp);
-    wstr_replace_all(tok, cap, L"%GameFilter%", gf_tcp);
+    wstr_replace_all(tok, cap, L"%GameFilter%", gf_any);
     /* caret-escaped exclamation mark used inside bat strategies */
     wstr_replace_all(tok, cap, L"^!", L"!");
 }
@@ -532,38 +536,178 @@ static void utils_path(wchar_t* out, size_t cap, const wchar_t* name)
     out[cap - 1] = 0;
 }
 
-int zg_gamefilter_get(void)
+/*
+ * Game filter — utils/game_filter.enabled
+ *
+ * zapret 1.10.4 format (written by service.bat and by this GUI):
+ *     mode=<disabled|all|tcp|udp>
+ *     tcp=<ports/ranges>          e.g. 1024-65535 or 1024-1934,1936-65535
+ *     udp=<ports/ranges>
+ * Legacy format (<= 1.10.3): a single word  all | tcp | udp  — still read.
+ * The parser below mirrors service.bat :game_switch_status line by line.
+ */
+
+#define ZG_GF_DEFAULT_RANGE L"1024-65535"
+
+/* one comma-separated item: N or N-M, 1..65535, no leading zeros, N <= M
+ * (mirrors :gf_validate_item) */
+static BOOL gf_item_ok(const wchar_t* s, int len)
 {
+    if (len <= 0 || len > 11) return FALSE;
+    int a = 0, b = 0, digits = 0, part = 0;   /* part 0 = start, 1 = end */
+    BOOL seen_dash = FALSE;
+    for (int i = 0; i < len; i++) {
+        wchar_t c = s[i];
+        if (c >= L'0' && c <= L'9') {
+            if (digits == 0 && c == L'0') return FALSE;      /* [1-9][0-9]* */
+            if (++digits > 5) return FALSE;
+            if (part == 0) a = a * 10 + (c - L'0'); else b = b * 10 + (c - L'0');
+        } else if (c == L'-' && !seen_dash && digits > 0) {
+            seen_dash = TRUE; part = 1; digits = 0;
+        } else {
+            return FALSE;
+        }
+    }
+    if (digits == 0) return FALSE;                           /* "5-" */
+    if (!seen_dash) b = a;
+    if (a > 65535 || b > 65535 || a > b) return FALSE;
+    return TRUE;
+}
+
+/* normalise (strip blanks) and validate a ports string; TRUE + `out` on success */
+BOOL zg_gamefilter_range_ok(const wchar_t* in, wchar_t* out, size_t cap)
+{
+    if (out && cap) out[0] = 0;
+    if (!in || !out || cap < 2) return FALSE;
+
+    wchar_t t[ZG_GF_RANGE_MAX + 1];
+    size_t n = 0;
+    for (const wchar_t* p = in; *p; p++) {
+        if (*p == L' ' || *p == L'\t' || *p == L'\r' || *p == L'\n') continue;
+        if (n >= ZG_GF_RANGE_MAX - 1) return FALSE;          /* too long */
+        t[n++] = *p;
+    }
+    t[n] = 0;
+    if (!n || n >= cap) return FALSE;
+
+    size_t start = 0;
+    for (size_t i = 0; i <= n; i++) {
+        if (i == n || t[i] == L',') {
+            if (!gf_item_ok(t + start, (int)(i - start))) return FALSE;
+            start = i + 1;
+        }
+    }
+    wcscpy(out, t);
+    return TRUE;
+}
+
+static BOOL gf_value_eq(const wchar_t* a, const wchar_t* b)
+{
+    return _wcsicmp(a, b) == 0;
+}
+
+void zg_gamefilter_load(ZgGameFilter* gf)
+{
+    gf->mode = ZG_GAME_OFF;
+    wcscpy(gf->tcp, ZG_GF_DEFAULT_RANGE);
+    wcscpy(gf->udp, ZG_GF_DEFAULT_RANGE);
+
     wchar_t p[MAX_PATH]; utils_path(p, MAX_PATH, L"game_filter.enabled");
     DWORD n;
     wchar_t* txt = read_file_bytes_as_w(p, &n);
-    if (!txt) return ZG_GAME_OFF;
+    if (!txt) return;
+
+    wchar_t tcp_c[ZG_GF_RANGE_MAX] = L"", udp_c[ZG_GF_RANGE_MAX] = L"";
     int mode = ZG_GAME_OFF;
-    wchar_t first[32]; int i = 0;
-    wchar_t* s = txt;
-    while (*s && *s != L'\r' && *s != L'\n' && i < 15) first[i++] = *s++;
-    first[i] = 0;
-    if (_wcsicmp(first, L"all") == 0)      mode = ZG_GAME_ALL;
-    else if (_wcsicmp(first, L"tcp") == 0) mode = ZG_GAME_TCP;
-    else if (_wcsicmp(first, L"udp") == 0) mode = ZG_GAME_UDP;
+
+    wchar_t* line = txt;
+    while (*line) {
+        wchar_t* e = line;
+        while (*e && *e != L'\r' && *e != L'\n') e++;
+        wchar_t saved = *e; *e = 0;
+
+        if (line[0] && line[0] != L';') {                    /* for /f eol=; */
+            wchar_t* eq = wcschr(line, L'=');
+            wchar_t key[32], val[ZG_GF_RANGE_MAX + 16];
+            size_t kl = eq ? (size_t)(eq - line) : wcslen(line);
+            if (kl < 32) {
+                wcsncpy(key, line, kl); key[kl] = 0;
+                wcsncpy(val, eq ? eq + 1 : L"", ZG_GF_RANGE_MAX + 15);
+                val[ZG_GF_RANGE_MAX + 15] = 0;
+
+                if (gf_value_eq(key, L"mode")) {
+                    if      (gf_value_eq(val, L"all")) mode = ZG_GAME_ALL;
+                    else if (gf_value_eq(val, L"tcp")) mode = ZG_GAME_TCP;
+                    else if (gf_value_eq(val, L"udp")) mode = ZG_GAME_UDP;
+                    else                               mode = ZG_GAME_OFF;
+                } else if (gf_value_eq(key, L"all")) {
+                    mode = ZG_GAME_ALL;
+                } else if (gf_value_eq(key, L"udp")) {
+                    if (!val[0]) mode = ZG_GAME_UDP;
+                    else { wcsncpy(udp_c, val, ZG_GF_RANGE_MAX - 1); udp_c[ZG_GF_RANGE_MAX - 1] = 0; }
+                } else if (gf_value_eq(key, L"tcp")) {
+                    if (!val[0]) mode = ZG_GAME_TCP;
+                    else { wcsncpy(tcp_c, val, ZG_GF_RANGE_MAX - 1); tcp_c[ZG_GF_RANGE_MAX - 1] = 0; }
+                }
+            }
+        }
+        *e = saved;
+        while (*e == L'\r' || *e == L'\n') e++;
+        line = e;
+    }
     HeapFree(GetProcessHeap(), 0, txt);
-    return mode;
+
+    gf->mode = mode;
+    wchar_t ok[ZG_GF_RANGE_MAX];
+    if (zg_gamefilter_range_ok(tcp_c, ok, ZG_GF_RANGE_MAX)) wcscpy(gf->tcp, ok);
+    if (zg_gamefilter_range_ok(udp_c, ok, ZG_GF_RANGE_MAX)) wcscpy(gf->udp, ok);
 }
 
-BOOL zg_gamefilter_set(int mode)
+BOOL zg_gamefilter_save(const ZgGameFilter* gf)
 {
     wchar_t p[MAX_PATH]; utils_path(p, MAX_PATH, L"game_filter.enabled");
-    if (mode == ZG_GAME_OFF)
-        return DeleteFileW(p) || GetLastError() == ERROR_FILE_NOT_FOUND;
 
-    const wchar_t* s = (mode == ZG_GAME_ALL) ? L"all\r\n"
-                    : (mode == ZG_GAME_TCP) ? L"tcp\r\n" : L"udp\r\n";
+    const wchar_t* m = (gf->mode == ZG_GAME_ALL) ? L"all"
+                     : (gf->mode == ZG_GAME_TCP) ? L"tcp"
+                     : (gf->mode == ZG_GAME_UDP) ? L"udp" : L"disabled";
+    wchar_t tcp[ZG_GF_RANGE_MAX], udp[ZG_GF_RANGE_MAX];
+    if (!zg_gamefilter_range_ok(gf->tcp, tcp, ZG_GF_RANGE_MAX)) wcscpy(tcp, ZG_GF_DEFAULT_RANGE);
+    if (!zg_gamefilter_range_ok(gf->udp, udp, ZG_GF_RANGE_MAX)) wcscpy(udp, ZG_GF_DEFAULT_RANGE);
+
+    /* the file is read by cmd.exe — plain ASCII, CRLF (digits , - and
+     * ASCII words only, so a direct narrowing is lossless) */
+    wchar_t wtxt[3 * ZG_GF_RANGE_MAX + 64];
+    _snwprintf(wtxt, sizeof(wtxt) / sizeof(wtxt[0]) - 1,
+               L"mode=%s\r\ntcp=%s\r\nudp=%s\r\n", m, tcp, udp);
+    wtxt[sizeof(wtxt) / sizeof(wtxt[0]) - 1] = 0;
+
+    char atxt[3 * ZG_GF_RANGE_MAX + 64];
+    int al = WideCharToMultiByte(CP_ACP, 0, wtxt, -1, atxt, (int)sizeof(atxt), NULL, NULL);
+    if (al <= 1) return FALSE;
+    al--;                                                    /* without the NUL */
+
     HANDLE h = CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return FALSE;
-    DWORD wr;
-    BOOL ok = WriteFile(h, s, (DWORD)(wcslen(s) * sizeof(wchar_t)), &wr, NULL);
+    DWORD wr = 0;
+    BOOL ok = WriteFile(h, atxt, (DWORD)al, &wr, NULL) && wr == (DWORD)al;
     CloseHandle(h);
     return ok;
+}
+
+int zg_gamefilter_get(void)
+{
+    ZgGameFilter gf;
+    zg_gamefilter_load(&gf);
+    return gf.mode;
+}
+
+/* switch the mode, keeping the user's port ranges */
+BOOL zg_gamefilter_set(int mode)
+{
+    ZgGameFilter gf;
+    zg_gamefilter_load(&gf);
+    gf.mode = mode;
+    return zg_gamefilter_save(&gf);
 }
 
 int zg_ipset_get(void)

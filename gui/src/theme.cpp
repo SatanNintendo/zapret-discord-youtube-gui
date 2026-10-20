@@ -48,6 +48,14 @@ static const ZgTheme TH_DARK = {
     /* card grad   */ RGB(0x35,0x35,0x35), RGB(0x25,0x25,0x25),
     /* setp grad   */ RGB(0x2B,0x2B,0x2B), RGB(0x1F,0x1F,0x1F),
     /* is_dark     */ TRUE,
+    /* bg gradient */ RGB(0x1B,0x1C,0x21), RGB(0x0F,0x10,0x13),
+    /* glow a / b  */ RGB(0x72,0x5E,0xF0), RGB(0x1E,0xB8,0xA6),
+    /* glow pct    */ 26, 11,
+    /* glass tint  */ RGB(0xE6,0xEA,0xF4),
+    /* glass a     */ 30, 8,
+    /* glass rim   */ 120,
+    /* glass sheen */ 20,
+    /* carbon      */ 40,
 };
 
 /* ------------------------------------------------------------------ */
@@ -89,6 +97,14 @@ static const ZgTheme TH_LIGHT = {
     /* card grad   */ RGB(0xFF,0xFF,0xFF), RGB(0xEC,0xF0,0xF5),
     /* setp grad   */ RGB(0xFF,0xFF,0xFF), RGB(0xE9,0xED,0xF2),
     /* is_dark     */ FALSE,
+    /* bg gradient */ RGB(0xF6,0xF8,0xFC), RGB(0xDD,0xE3,0xEE),
+    /* glow a / b  */ RGB(0xB9,0xA8,0xFF), RGB(0x9B,0xE3,0xD2),
+    /* glow pct    */ 44, 30,
+    /* glass tint  */ RGB(0xFF,0xFF,0xFF),
+    /* glass a     */ 190, 105,
+    /* glass rim   */ 235,
+    /* glass sheen */ 70,
+    /* carbon      */ 12,
 };
 
 /* ------------------------------------------------------------------ */
@@ -130,6 +146,14 @@ static const ZgTheme TH_MIDNIGHT = {
     /* card grad   */ RGB(0x1E,0x29,0x39), RGB(0x16,0x20,0x2E),
     /* setp grad   */ RGB(0x18,0x21,0x2F), RGB(0x12,0x1A,0x26),
     /* is_dark     */ TRUE,
+    /* bg gradient */ RGB(0x0F,0x17,0x2A), RGB(0x07,0x0B,0x15),
+    /* glow a / b  */ RGB(0x3F,0x63,0xFF), RGB(0x00,0xB4,0xD8),
+    /* glow pct    */ 34, 16,
+    /* glass tint  */ RGB(0xBF,0xD2,0xFF),
+    /* glass a     */ 34, 9,
+    /* glass rim   */ 125,
+    /* glass sheen */ 22,
+    /* carbon      */ 38,
 };
 
 void zg_theme_apply(int id)

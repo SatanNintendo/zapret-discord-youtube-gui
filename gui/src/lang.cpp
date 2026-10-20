@@ -189,6 +189,16 @@ const wchar_t* const TBL_RU[ZG_STR_COUNT] = {
     L"Hosts требует обновления: скопируйте строки из открывшегося файла",
     L"в %ls (файл hosts — открыть от имени администратора)",
     L"Hosts актуален",
+    L"Порты игрового фильтра",
+    L"Порты и диапазоны через запятую, без пробелов. Пример: 1024-1934,1936-65535 (допустимо 1–65535).",
+    L"Порты TCP",
+    L"Порты UDP",
+    L"Сохранить",
+    L"Отмена",
+    L"По умолчанию",
+    L"Ошибка в поле «%s» — пример: 80,443,5000-6000",
+    L"Порты игрового фильтра: TCP %s, UDP %s",
+    L"Не удалось сохранить порты игрового фильтра",
 };
 
 /* ------------------------------------------------------------------ */
@@ -358,6 +368,16 @@ const wchar_t* const TBL_EN[ZG_STR_COUNT] = {
     L"Hosts needs an update: copy the lines from the file that just opened",
     L"into %ls (the hosts file — open it as administrator)",
     L"Hosts is up to date",
+    L"Game filter ports",
+    L"Ports and ranges separated by commas, no spaces. Example: 1024-1934,1936-65535 (1-65535).",
+    L"TCP ports",
+    L"UDP ports",
+    L"Save",
+    L"Cancel",
+    L"Defaults",
+    L"Invalid \"%s\" — example: 80,443,5000-6000",
+    L"Game filter ports: TCP %s, UDP %s",
+    L"Failed to save the game filter ports",
 };
 
 /* compile-time integrity checks */
@@ -368,10 +388,10 @@ typedef char zg_tbl_en_size_check[(sizeof(TBL_EN) / sizeof(TBL_EN[0]) == ZG_STR_
 /* per-language label sets                                              */
 /* ------------------------------------------------------------------ */
 static const wchar_t* const GAME_RU[4] = {
-    L"Отключён", L"Включён (UDP)", L"Включён (TCP)", L"Включён (TCP и UDP)"
+    L"Отключён", L"UDP", L"TCP", L"TCP и UDP"
 };
 static const wchar_t* const GAME_EN[4] = {
-    L"Off", L"Enabled (UDP)", L"Enabled (TCP)", L"Enabled (TCP & UDP)"
+    L"Off", L"UDP", L"TCP", L"TCP & UDP"
 };
 static const wchar_t* const IPSET_RU[3] = {
     L"Загружен (список)", L"Отключён (none)", L"Любой IP (any)"

@@ -22,6 +22,8 @@
 #include "netops.h"
 #include "applog.h"
 #include "uidraw.h"
+#include "gfx.h"
+#include "portsdlg.h"
 
 using namespace Gdiplus;
 
@@ -36,6 +38,7 @@ HFONT g_font_title = NULL, g_font_status = NULL, g_font_body = NULL,
 
 static HWND g_hMain = NULL;
 static HWND g_hPrimary = NULL;
+static HWND g_hBtnPorts = NULL;
 static HWND g_hBtnDiag = NULL, g_hBtnHosts = NULL, g_hBtnIpset = NULL,
             g_hBtnTests = NULL, g_hBtnCheckUpd = NULL, g_hBtnLogClear = NULL;
 static HWND g_hComboStrat = NULL, g_hComboGame = NULL, g_hComboIpset = NULL;
@@ -349,42 +352,26 @@ static void run_op(int op, const wchar_t* strat_for_install)
 static const float BOLT_X[6] = { 0.585f, 0.245f, 0.460f, 0.415f, 0.760f, 0.535f };
 static const float BOLT_Y[6] = { 0.080f, 0.545f, 0.545f, 0.920f, 0.395f, 0.395f };
 
-static void draw_app_icon(Graphics& g, int x, int y, int size)
+static ZgCanvas g_bd;      /* pre-rendered static surface (backdrop) */
+static ZgCanvas g_frame;   /* per-paint working copy                 */
+
+static void bolt_polygon(Graphics& g, float cx, float cy, float r, BOOL white, COLORREF col)
 {
-    /* purple rounded square with white bolt + chrome gloss — matches app.ico */
-    Gdiplus::GraphicsPath* p = zg_round_path(x, y, size, size, size / 4);
-    Gdiplus::LinearGradientBrush br(
-        Gdiplus::Point(x, y), Gdiplus::Point(x, y + size),
-        Gdiplus::Color(255, 0x8A, 0x6C, 0xF5), Gdiplus::Color(255, 0x6A, 0x50, 0xD8));
-    g.FillPath(&br, p);
-
-    /* specular gloss on the upper half */
-    {
-        Gdiplus::LinearGradientBrush gl(Gdiplus::Point(x, y),
-                                         Gdiplus::Point(x, y + size * 55 / 100),
-                                         Gdiplus::Color(105, 255, 255, 255),
-                                         Gdiplus::Color(0, 255, 255, 255));
-        gl.SetWrapMode(Gdiplus::WrapModeClamp);
-        g.FillPath(&gl, p);
-    }
-
-    /* chrome rim */
-    {
-        Gdiplus::GraphicsPath* inset = zg_round_path(x + 1, y + 1, size - 2, size - 2, size / 4 - 1);
-        Gdiplus::Pen rim(Gdiplus::Color(120, 255, 255, 255), 1.0f);
-        g.DrawPath(&rim, inset);
-        delete inset;
-    }
-    delete p;
-
     Gdiplus::PointF pts[6];
     for (int i = 0; i < 6; i++) {
-        pts[i].X = x + size * 0.18f + size * 0.64f * BOLT_X[i];
-        pts[i].Y = y + size * 0.05f + size * 0.90f * BOLT_Y[i];
+        pts[i].X = cx + r * (BOLT_X[i] * 2.0f - 1.0f);
+        pts[i].Y = cy + r * (BOLT_Y[i] * 2.0f - 1.0f);
     }
     Gdiplus::GraphicsPath bolt;
     bolt.AddPolygon(pts, 6);
-    Gdiplus::SolidBrush wb(Gdiplus::Color(255, 255, 255, 255));
+    /* soft contact shadow under the glyph */
+    Gdiplus::GraphicsPath sh;
+    for (int i = 0; i < 6; i++) pts[i].Y += r * 0.07f;
+    sh.AddPolygon(pts, 6);
+    Gdiplus::SolidBrush sb(Gdiplus::Color(white ? 70 : 40, 0, 0, 0));
+    g.FillPath(&sb, &sh);
+    Gdiplus::SolidBrush wb(white ? Gdiplus::Color(255, 255, 255, 255)
+                                 : Gdiplus::Color(zg_argb(255, col)));
     g.FillPath(&wb, &bolt);
 }
 
@@ -400,61 +387,19 @@ static void draw_section_header(HDC hdc, const wchar_t* text, int x, int y, int 
     SelectObject(hdc, of);
 }
 
-static void paint_hero_shapes(Graphics& g)
+/* software stage: icon tile, hero disc + halo */
+static void paint_hero_sw(ZgCanvas* c)
+{
+    zg_gfx_hero(c, (float)SC(DU_CIRCLE_CX), (float)SC(DU_CIRCLE_CY),
+                (float)SC(DU_CIRCLE_R), g_st.winws_running);
+}
+
+/* GDI+ stage: glyphs */
+static void paint_hero_bolt(Graphics& g)
 {
     int cx = SC(DU_CIRCLE_CX), cy = SC(DU_CIRCLE_CY), r = SC(DU_CIRCLE_R);
-    BOOL active = g_st.winws_running;
-
-    /* glow rings */
-    if (active) {
-        Gdiplus::Color alphas[] = {
-            Gdiplus::Color(26,  0x32, 0xCD, 0x32),
-            Gdiplus::Color(40,  0x32, 0xCD, 0x32),
-            Gdiplus::Color(60,  0x32, 0xCD, 0x32),
-            Gdiplus::Color(95,  0x32, 0xCD, 0x32),
-        };
-        int dr[] = { 11, 8, 5, 2 };
-        for (int i = 0; i < 4; i++) {
-            Gdiplus::SolidBrush gb(alphas[i]);
-            g.FillEllipse(&gb, cx - r - SC(dr[i]), cy - r - SC(dr[i]),
-                             (r + SC(dr[i])) * 2, (r + SC(dr[i])) * 2);
-        }
-    }
-
-    /* disc */
-    Gdiplus::SolidBrush disc(Gdiplus::Color(zg_argb(255, g_th.hero_disc)));
-    g.FillEllipse(&disc, cx - r, cy - r, r * 2, r * 2);
-
-    /* chrome ring: vertical gradient stroke (metallic / glowing green) */
-    {
-        int pw = SC(3);
-        Gdiplus::Rect ringrc(cx - r - pw, cy - r - pw, (r + pw) * 2, (r + pw) * 2);
-        Gdiplus::Color c_top, c_bot;
-        if (active) {
-            c_top = Gdiplus::Color(255, 0x7C, 0xEC, 0x7C);
-            c_bot = Gdiplus::Color(255, 0x1F, 0x8F, 0x1F);
-        } else {
-            c_top = Gdiplus::Color(255, 0xC8, 0xCD, 0xD4);
-            c_bot = Gdiplus::Color(255, 0x4A, 0x50, 0x58);
-        }
-        Gdiplus::LinearGradientBrush rb(ringrc, c_top, c_bot,
-                                        Gdiplus::LinearGradientModeVertical);
-        Gdiplus::Pen ring(&rb, (Gdiplus::REAL)pw);
-        g.DrawEllipse(&ring, cx - r, cy - r, r * 2, r * 2);
-    }
-
-    /* bolt */
-    Gdiplus::PointF pts[6];
-    float m = 0.62f;
-    for (int i = 0; i < 6; i++) {
-        pts[i].X = cx + r * m * (BOLT_X[i] * 2.0f - 1.0f) * 0.95f;
-        pts[i].Y = cy + r * m * (BOLT_Y[i] * 2.0f - 1.0f) * 0.95f;
-    }
-    Gdiplus::GraphicsPath bolt;
-    bolt.AddPolygon(pts, 6);
-    Gdiplus::SolidBrush wb(active ? Gdiplus::Color(255, 255, 255, 255)
-                                  : Gdiplus::Color(zg_argb(255, g_th.hero_bolt_off)));
-    g.FillPath(&wb, &bolt);
+    float k = r * 0.62f * 0.95f;
+    bolt_polygon(g, (float)cx, (float)cy, k, g_st.winws_running, g_th.hero_bolt_off);
 }
 
 static void paint_hero_text(HDC hdc)
@@ -500,35 +445,21 @@ static void paint_hero_text(HDC hdc)
     SelectObject(hdc, of);
 }
 
-static void paint_cards_shapes(Graphics& g)
+/* glass cards are part of the backdrop; only the status beads are dynamic */
+static void paint_cards_sw(ZgCanvas* c)
 {
     COLORREF dots[3];
     dots[0] = g_st.winws_running ? COL_GREEN : COL_GRAY_DIM;
-
-    if (g_st.svc_running)         { dots[1] = COL_GREEN; }
-    else if (g_st.svc_installed)  { dots[1] = COL_GRAY; }
-    else                          { dots[1] = COL_GRAY_DIM; }
-
+    if (g_st.svc_running)         dots[1] = COL_GREEN;
+    else if (g_st.svc_installed)  dots[1] = COL_GRAY;
+    else                          dots[1] = COL_GRAY_DIM;
     dots[2] = g_st.windivert_running ? COL_GREEN : COL_GRAY_DIM;
 
-    int w = SC(DU_CARD_W), h = SC(DU_CARD_H), y = SC(DU_CARDS_Y);
+    int w = SC(DU_CARD_W), y = SC(DU_CARDS_Y);
+    bool on[3] = { g_st.winws_running != 0, g_st.svc_running != 0, g_st.windivert_running != 0 };
     for (int i = 0; i < 3; i++) {
         int x = SC(DU_PAD) + i * (w + SC(DU_CARD_GAP));
-
-        /* soft lift + chrome body */
-        zg_draw_shadow(g, x, y, w, h, SC(12), SC(3), 45);
-        zg_draw_chrome_panel(g, x, y, w, h, SC(12),
-                            g_th.card_top, g_th.card_bot, g_th.border_dim, 35);
-
-        /* status dot with glow */
-        int dy = y + SC(28);
-        {
-            Gdiplus::Color dc(zg_argb(255, dots[i]));
-            Gdiplus::SolidBrush glow(Gdiplus::Color(60, dc.GetR(), dc.GetG(), dc.GetB()));
-            g.FillEllipse(&glow, x + SC(13), dy - SC(3), SC(13), SC(13));
-        }
-        Gdiplus::SolidBrush dotb(zg_argb(255, dots[i]));
-        g.FillEllipse(&dotb, x + SC(16), dy, SC(7), SC(7));
+        zg_gfx_dot(c, x + SC(19.5), y + SC(32), SC(3.6), dots[i], on[i] ? 150 : 0);
     }
 }
 
@@ -570,23 +501,6 @@ static void paint_cards_text(HDC hdc)
     }
 }
 
-static void paint_settings_panel_shapes(Graphics& g)
-{
-    int x = SC(DU_PAD), y = SC(DU_SET_Y), w = SC(DU_CONTENT_W), h = SC(DU_SET_H);
-
-    zg_draw_shadow(g, x, y, w, h, SC(12), SC(3), 45);
-    zg_draw_chrome_panel(g, x, y, w, h, SC(12),
-                         g_th.setp_top, g_th.setp_bot, g_th.border_dim, 25);
-
-    /* row separators (subtle) */
-    for (int i = 1; i < DU_SET_ROWS; i++) {
-        int sy = y + SC(6) + i * SC(DU_ROW_H);
-        Gdiplus::Pen sp(Gdiplus::Color(45, GetRValue(g_th.border), GetGValue(g_th.border),
-                                       GetBValue(g_th.border)));
-        g.DrawLine(&sp, x + SC(16), sy, x + w - SC(16), sy);
-    }
-}
-
 static void paint_settings_panel_text(HDC hdc)
 {
     int x = SC(DU_PAD), y = SC(DU_SET_Y), w = SC(DU_CONTENT_W);
@@ -609,7 +523,7 @@ static void paint_settings_panel_text(HDC hdc)
     /* row 1 — game filter (left) + ipset (right) */
     L[n].id = S_LBL_GAME; L[n].row = 1;
     L[n].x0 = x + SC(16);
-    L[n].x1 = mid - SC(16) - SC(DU_COMBO_W2) - SC(10);
+    L[n].x1 = mid - SC(16) - SC(DU_GAME_TOTAL) - SC(10);
     n++;
     L[n].id = S_LBL_IPSET; L[n].row = 1;
     L[n].x0 = mid + SC(16);
@@ -648,10 +562,17 @@ static void paint_settings_panel_text(HDC hdc)
     SelectObject(hdc, of);
 }
 
-static void paint_header_shapes(Graphics& g)
+static void paint_header_sw(ZgCanvas* c)
 {
-    /* icon */
-    draw_app_icon(g, SC(DU_ICON_X), SC(DU_ICON_Y), SC(DU_ICON_SIZE));
+    zg_gfx_icon_tile(c, SC(DU_ICON_X), SC(DU_ICON_Y), SC(DU_ICON_SIZE));
+}
+
+static void paint_header_bolt(Graphics& g)
+{
+    float x = (float)SC(DU_ICON_X), y = (float)SC(DU_ICON_Y), sz = (float)SC(DU_ICON_SIZE);
+    /* same box the bolt occupied in the old icon: 0.18..0.82 x 0.05..0.95 */
+    float cx = x + sz * 0.5f, cy = y + sz * 0.5f;
+    bolt_polygon(g, cx, cy, sz * 0.32f * 1.0f, TRUE, 0);
 }
 
 static void paint_header_text(HDC hdc)
@@ -674,9 +595,7 @@ static void paint_header_text(HDC hdc)
 
     /* version (top-right) */
     wchar_t ver[64];
-    _snwprintf(ver, 63, L"zapret %s  \u00b7  GUI %s",
-               g_st.local_version[0] ? g_st.local_version : L"?",
-               ZG_GUI_VERSION);
+    _snwprintf(ver, 63, L"%s", ZG_GUI_VERSION);
     ver[63] = 0;
 
     of = (HFONT)SelectObject(hdc, g_font_small);
@@ -688,77 +607,53 @@ static void paint_header_text(HDC hdc)
     /* update-check link is a child control (ZGBTN_LINK) */
 }
 
-static void paint_log_frame(Graphics& g)
-{
-    /* chrome plate behind the log area (the RichEdit sits on top) */
-    int x = SC(DU_PAD) - 1, y = SC(DU_LOG_Y) - 1;
-    int w = SC(DU_CONTENT_W) + 2, h = SC(DU_LOG_H) + 2;
-    zg_draw_shadow(g, x, y, w, h, SC(8), SC(2), 35);
-    zg_draw_chrome_panel(g, x, y, w, h, SC(8),
-                         g_th.bg_dark, g_th.bg_dark, g_th.border_dim, 0);
-}
-
 /* ================================================================== */
-/* layout                                                              */
+/* backdrop: everything static, rendered once per size/theme/DPI       */
 /* ================================================================== */
 
-/* ---- local background replicas for the child controls -------------- */
-
-/*
- * Mirrors zg_draw_chrome_panel(): a vertical gradient plus a white
- * gloss fading out over the upper 55%. Integer math stays within
- * ~1/255 per channel of what GDI+ renders — invisible under the 4px
- * shadow fringe of a control.
- */
-static COLORREF panel_color_at(int y, int gloss_alpha)
+static void rebuild_backdrop(void)
 {
-    int py = SC(DU_SET_Y), ph = SC(DU_SET_H);
-    int t = y - py;
-    if (t < 0) t = 0;
-    if (t > ph) t = ph;
+    if (!g_hMain) return;
+    RECT rc; GetClientRect(g_hMain, &rc);
+    int w = rc.right, h = rc.bottom;
+    if (w < 1 || h < 1) return;
 
-    int r = GetRValue(g_th.setp_top) + (GetRValue(g_th.setp_bot) - GetRValue(g_th.setp_top)) * t / ph;
-    int g = GetGValue(g_th.setp_top) + (GetGValue(g_th.setp_bot) - GetGValue(g_th.setp_top)) * t / ph;
-    int b = GetBValue(g_th.setp_top) + (GetBValue(g_th.setp_bot) - GetBValue(g_th.setp_top)) * t / ph;
+    zg_backdrop_attach(g_hMain, NULL);
+    zg_canvas_destroy(&g_bd);
+    zg_canvas_destroy(&g_frame);
+    if (!zg_canvas_create(&g_bd, w, h) || !zg_canvas_create(&g_frame, w, h)) return;
 
-    int gh = ph * 55 / 100;
-    if (t < gh && gloss_alpha > 0) {
-        int a = gloss_alpha * (gh - t) / gh;   /* 0..gloss_alpha */
-        r += (255 - r) * a / 255;
-        g += (255 - g) * a / 255;
-        b += (255 - b) * a / 255;
-    }
-    if (r > 255) r = 255;
-    if (g > 255) g = 255;
-    if (b > 255) b = 255;
-    return RGB(r, g, b);
+    zg_gfx_background(&g_bd);
+
+    /* status cards */
+    ZgGlass card; zg_glass_style_card(&card);
+    int cw = SC(DU_CARD_W), ch = SC(DU_CARD_H), cy = SC(DU_CARDS_Y);
+    for (int i = 0; i < 3; i++)
+        zg_gfx_glass(&g_bd, SC(DU_PAD) + i * (cw + SC(DU_CARD_GAP)), cy, cw, ch, SC(12), &card);
+
+    /* settings panel + engraved separators */
+    ZgGlass panel; zg_glass_style_panel(&panel);
+    int px = SC(DU_PAD), py = SC(DU_SET_Y), pw = SC(DU_CONTENT_W), ph = SC(DU_SET_H);
+    zg_gfx_glass(&g_bd, px, py, pw, ph, SC(14), &panel);
+    for (int i = 1; i < DU_SET_ROWS; i++)
+        zg_gfx_separator(&g_bd, px + SC(16), px + pw - SC(16), py + SC(6) + i * SC(DU_ROW_H));
+
+    /* sunken log field */
+    ZgGlass fld; zg_glass_style_field(&fld);
+    zg_gfx_glass(&g_bd, SC(DU_PAD) - 1, SC(DU_LOG_Y) - 1, SC(DU_CONTENT_W) + 2, SC(DU_LOG_H) + 2, SC(8), &fld);
+
+    GdiFlush();
+    zg_backdrop_attach(g_hMain, &g_bd);
 }
 
-/* the settings-panel gradient colors under a control's top/bottom edge */
-static void set_panel_bg(HWND h)
-{
-    RECT r;
-    GetWindowRect(h, &r);
-    MapWindowPoints(HWND_DESKTOP, g_hMain, (POINT*)&r, 2);
-    zg_ctrl_set_bg(h, panel_color_at(r.top, 25), panel_color_at(r.bottom, 25));
-}
+static void invalidate_all(void);
 
-/* push a local background replica into every child control */
+/* backdrop changed: re-render it and make every child re-read its crop */
 static void update_ctrl_bgs(void)
 {
     if (!g_hMain) return;
-
-    /* controls sitting on the plain window background */
-    HWND plain[] = { g_hPrimary, g_hBtnDiag, g_hBtnHosts, g_hBtnIpset,
-                     g_hBtnTests, g_hBtnCheckUpd, g_hBtnLogClear };
-    for (int i = 0; i < (int)(sizeof(plain) / sizeof(plain[0])); i++)
-        if (plain[i]) zg_ctrl_set_bg(plain[i], g_th.bg, g_th.bg);
-
-    /* combos / toggles sitting on the chrome settings panel */
-    HWND panel[] = { g_hComboStrat, g_hComboGame, g_hComboIpset,
-                     g_hComboLang, g_hComboTheme, g_hTglSvc, g_hTglUpd };
-    for (int i = 0; i < (int)(sizeof(panel) / sizeof(panel[0])); i++)
-        if (panel[i]) set_panel_bg(panel[i]);
+    rebuild_backdrop();
+    invalidate_all();
 }
 
 static void apply_layout(void)
@@ -803,8 +698,12 @@ static void apply_layout(void)
 
     /* row 1: game filter (left) + ipset (right) */
     SetWindowPos(g_hComboGame, NULL,
-                 mid - SC(16) - SC(DU_COMBO_W2) - pad, ROW_CY(1) - pad,
+                 mid - SC(16) - SC(DU_GAME_TOTAL) - pad, ROW_CY(1) - pad,
                  SC(DU_COMBO_W2) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(g_hBtnPorts, NULL,
+                 mid - SC(16) - SC(DU_GEAR_W) - pad, ROW_CY(1) - pad,
+                 SC(DU_GEAR_W) + 2 * pad, SC(DU_CTRL_H) + 2 * pad,
                  SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(g_hComboIpset, NULL,
                  px + pw - SC(16) - SC(DU_COMBO_W2B) - pad, ROW_CY(1) - pad,
@@ -860,6 +759,7 @@ static void set_controls_busy(BOOL busy)
     /* primary stays clickable even without zapret files — it opens
      * the folder picker in that state                          */
     zg_button_set_disabled(g_hPrimary, busy);
+    zg_button_set_disabled(g_hBtnPorts, busy);
     zg_button_set_disabled(g_hBtnDiag, busy);
     zg_button_set_disabled(g_hBtnHosts, busy);
     zg_button_set_disabled(g_hBtnIpset, busy);
@@ -871,7 +771,7 @@ static void set_controls_busy(BOOL busy)
 
 static void invalidate_all(void)
 {
-    HWND ctrls[] = { g_hPrimary, g_hBtnDiag, g_hBtnHosts, g_hBtnIpset,
+    HWND ctrls[] = { g_hPrimary, g_hBtnPorts, g_hBtnDiag, g_hBtnHosts, g_hBtnIpset,
                      g_hBtnTests, g_hBtnCheckUpd, g_hBtnLogClear,
                      g_hComboStrat, g_hComboGame, g_hComboIpset,
                      g_hComboLang, g_hComboTheme, g_hTglSvc, g_hTglUpd };
@@ -1352,6 +1252,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hComboStrat = zg_combo_create(hwnd, IDC_COMBO_STRAT,
                                         (const wchar_t* const*)g_strats, g_stratCount,
                                         g_stratCount > 0 ? 0 : -1);
+        g_hBtnPorts = zg_button_create(hwnd, IDC_BTN_GAMEPORTS, L"", ZGBTN_GEAR, 0);
         g_hComboGame = zg_combo_create(hwnd, IDC_COMBO_GAME,
                                         zg_game_labels(), 4, 0);
         g_hComboIpset = zg_combo_create(hwnd, IDC_COMBO_IPSET,
@@ -1383,58 +1284,38 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
-
         RECT crc; GetClientRect(hwnd, &crc);
-        int cw = crc.right, ch = crc.bottom;
+        if (!g_bd.px || g_bd.w != crc.right || g_bd.h != crc.bottom) rebuild_backdrop();
 
-        /* double buffer */
-        HDC mem = CreateCompatibleDC(hdc);
-        HBITMAP bmp = CreateCompatibleBitmap(hdc, cw, ch);
-        HBITMAP obmp = (HBITMAP)SelectObject(mem, bmp);
-
-        HBRUSH bg = CreateSolidBrush(COL_BG);
-        RECT fr = { 0, 0, cw, ch };
-        FillRect(mem, &fr, bg);
-        DeleteObject(bg);
-
-        /*
-         * Two-phase painting — NEVER interleave GDI and GDI+ calls
-         * on the same DC: a live Gdiplus::Graphics object changes the
-         * DC state (GM_ADVANCED + world transform), which corrupts
-         * GDI text output and displaces later GDI+ shapes on cached
-         * common DCs. Phase A = all GDI+ shapes; phase B = all GDI text.
-         */
-        {
-            Graphics g(mem);
-            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-
-            paint_header_shapes(g);
-            paint_hero_shapes(g);
-            paint_cards_shapes(g);
-            paint_settings_panel_shapes(g);
-            paint_log_frame(g);
-        }  /* Graphics object destroyed here — DC back to clean GDI state */
-
-        {
+        if (g_frame.px) {
+            HDC mem = g_frame.dc;
+            /* 1. static surface */
+            zg_canvas_copy_rect(&g_frame, 0, 0, &g_bd, 0, 0, g_bd.w, g_bd.h);
+            /* 2. software shapes (dithered glass / chrome) */
+            paint_header_sw(&g_frame);
+            paint_hero_sw(&g_frame);
+            paint_cards_sw(&g_frame);
+            /* 3. GDI+ glyphs (never mixed with GDI text on the same DC state) */
+            {
+                Graphics g(mem);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                paint_header_bolt(g);
+                paint_hero_bolt(g);
+            }
+            GdiFlush();
+            /* 4. GDI text */
             SetBkMode(mem, TRANSPARENT);
             paint_header_text(mem);
             paint_hero_text(mem);
             paint_cards_text(mem);
-            draw_section_header(mem, zg_str(S_SEC_SETTINGS),
-                                SC(DU_PAD), SC(DU_SET_HDR_Y), SC(DU_CONTENT_W));
+            draw_section_header(mem, zg_str(S_SEC_SETTINGS), SC(DU_PAD), SC(DU_SET_HDR_Y), SC(DU_CONTENT_W));
             paint_settings_panel_text(mem);
-            draw_section_header(mem, zg_str(S_SEC_LOG),
-                                SC(DU_PAD), SC(DU_LOG_HDR_Y), SC(DU_CONTENT_W));
+            draw_section_header(mem, zg_str(S_SEC_LOG), SC(DU_PAD), SC(DU_LOG_HDR_Y), SC(DU_CONTENT_W));
+
+            BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top,
+                   ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top,
+                   mem, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
         }
-
-        BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top,
-               ps.rcPaint.right - ps.rcPaint.left,
-               ps.rcPaint.bottom - ps.rcPaint.top,
-               mem, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
-        SelectObject(mem, obmp);
-        DeleteObject(bmp);
-        DeleteDC(mem);
-
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -1564,6 +1445,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             tray_update_tooltip();
             break;
         }
+        case IDC_BTN_GAMEPORTS: {
+            ZgGameFilter gf;
+            zg_gamefilter_load(&gf);
+            if (zg_ports_dialog(hwnd, &gf)) {
+                if (zg_gamefilter_save(&gf)) {
+                    ui_log(ZLOG_OK, zg_str(S_LOG_PORTS_SET), gf.tcp, gf.udp);
+                    ui_log(ZLOG_WARN, L"%s", zg_str(S_LOG_RESTART_HINT2));
+                } else {
+                    ui_log(ZLOG_ERR, L"%s", zg_str(S_LOG_PORTS_ERR));
+                }
+            }
+            break;
+        }
         case IDC_BTN_DIAG:
             ui_log(ZLOG_INFO, L"%s", zg_str(S_LOG_OPEN_DIAG));
             zg_open_console_bat(L"diag");
@@ -1627,8 +1521,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
         } else if (id == IDC_COMBO_GAME) {
             if (idx >= 0 && idx < 4) {
-                if (zg_gamefilter_set(GAME_MODES[idx]))
+                if (zg_gamefilter_set(GAME_MODES[idx])) {
                     ui_log(ZLOG_OK, zg_str(S_LOG_GAME_SET), zg_game_labels()[idx]);
+                    if (GAME_MODES[idx] != ZG_GAME_OFF) {
+                        ZgGameFilter gf; zg_gamefilter_load(&gf);
+                        ui_log(ZLOG_INFO, zg_str(S_LOG_PORTS_SET), gf.tcp, gf.udp);
+                    }
+                }
                 else
                     ui_log(ZLOG_ERR, L"%s", zg_str(S_LOG_GAME_ERR));
                 ui_log(ZLOG_WARN, L"%s", zg_str(S_LOG_RESTART_HINT2));
@@ -1678,6 +1577,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_DESTROY: {
         KillTimer(hwnd, ZG_TIMER_STATUS);
+        zg_backdrop_attach(hwnd, NULL);
+        zg_canvas_destroy(&g_bd);
+        zg_canvas_destroy(&g_frame);
         tray_remove();
         if (g_st.winws_running && g_st.own_child_alive)
             ui_log(ZLOG_INFO, L"%s", zg_str(S_LOG_GUI_CLOSED));

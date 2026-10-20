@@ -10,7 +10,7 @@
 #include "lang.h"
 
 #define ZG_APP_NAME     L"Zapret GUI"
-#define ZG_GUI_VERSION  L"1.1.1"
+#define ZG_GUI_VERSION  L"1.0 (build 1.10.4)"   /* shown everywhere: header, log, exe properties */
 #define ZG_WND_CLASS    L"ZapretGuiWnd"
 #define ZG_TIMER_STATUS 1
 
@@ -34,6 +34,7 @@
 #define IDC_BTN_TESTS     104
 #define IDC_BTN_CHECKUPD  105
 #define IDC_BTN_LOGCLEAR  106
+#define IDC_BTN_GAMEPORTS 107
 #define IDC_COMBO_STRAT   200
 #define IDC_COMBO_GAME    201
 #define IDC_COMBO_IPSET   202
