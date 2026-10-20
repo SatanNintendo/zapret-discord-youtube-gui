@@ -70,13 +70,22 @@ jobs:
           print('binary string checks passed')
           EOF
 
-      - name: Package
+      - name: Package (ready-to-run folder: GUI + everything zapret needs)
         run: |
-          mkdir -p staging-compiled
-          cp gui/build/ZapretGUI.exe staging-compiled/
-          cp service.bat staging-compiled/
-          cp gui/dist-README.txt staging-compiled/README-GUI.txt
-          (cd staging-compiled && zip -r -X ../zapret-gui-compiled.zip .)
+          D=staging-compiled
+          mkdir -p "$D"
+          cp gui/build/ZapretGUI.exe "$D/"
+          cp gui/dist-README.txt "$D/README-GUI.txt"
+          # zapret itself: winws.exe + WinDivert (bin), lists, strategies, service files
+          cp -r bin lists utils .service "$D/"
+          cp service.bat README.md "$D/"
+          cp general*.bat "$D/"
+          # sanity: the GUI refuses to work without these
+          test -f "$D/bin/winws.exe"
+          test -f "$D/bin/WinDivert64.sys"
+          test -f "$D/service.bat"
+          ls "$D"/general*.bat >/dev/null
+          (cd "$D" && zip -r -X ../zapret-gui-compiled.zip .)
           sha256sum zapret-gui-compiled.zip
 
       - name: Upload compiled artifact
