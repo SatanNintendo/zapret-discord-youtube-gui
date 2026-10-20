@@ -52,6 +52,7 @@ static ZgStatus  g_st;
 static BOOL      g_busy = FALSE;      /* worker op in flight */
 static BOOL      g_hidden = FALSE;   /* window hidden to tray      */
 static BOOL      g_tray_added = FALSE;
+static BOOL      g_tray_wanted = FALSE; /* tray icon should exist after first minimize */
 static BOOL      g_balloon_shown = FALSE;   /* once per session     */
 static UINT      g_msgTaskbarCreated = 0;
 
@@ -940,6 +941,9 @@ static void tray_tip_cache_store(const wchar_t* tip)
 
 static void tray_add(BOOL show_balloon)
 {
+    /* Once created, the tray icon stays present even while the window is open. */
+    g_tray_wanted = TRUE;
+
     NOTIFYICONDATAW nid;
     ZeroMemory(&nid, sizeof(nid));
     nid.cbSize           = sizeof(nid);      /* full struct: OK on Vista+/Win7 */
@@ -953,8 +957,13 @@ static void tray_add(BOOL show_balloon)
 
     g_tray_added = Shell_NotifyIconW(NIM_ADD, &nid) ? TRUE : FALSE;
 
-    if (g_tray_added)
+    if (g_tray_added) {
         tray_tip_cache_store(tray_tip_text());
+    } else {
+        /* Do not claim the shell has this icon when NIM_ADD failed. */
+        g_tray_on_cache = -1;
+        g_tray_tip_cache[0] = 0;
+    }
 
     /* one-time balloon so the user knows where the app went */
     if (g_tray_added && show_balloon && !g_balloon_shown) {
@@ -976,21 +985,31 @@ static void tray_add(BOOL show_balloon)
 
 static void tray_remove(void)
 {
-    if (!g_tray_added) return;
+    g_tray_wanted = FALSE;
+
+    /* NIM_DELETE is harmless when the shell has already lost the icon. */
     NOTIFYICONDATAW nid;
     ZeroMemory(&nid, sizeof(nid));
     nid.cbSize = sizeof(nid);
     nid.hWnd   = g_hMain;
     nid.uID    = 1;
     Shell_NotifyIconW(NIM_DELETE, &nid);
+
     g_tray_added = FALSE;
     g_tray_on_cache = -1;   /* force a fresh tooltip on the next add */
+    g_tray_tip_cache[0] = 0;
 }
 
 /* refresh icon + tooltip after a status change */
 static void tray_update_tooltip(void)
 {
-    if (!g_tray_added) return;
+    if (!g_tray_wanted) return;
+
+    /* Retry NIM_ADD if a previous shell operation failed. */
+    if (!g_tray_added) {
+        tray_add(FALSE);
+        if (!g_tray_added) return;
+    }
 
     const wchar_t* tip = tray_tip_text();
     int on = g_st.winws_running ? 1 : 0;
@@ -1006,8 +1025,22 @@ static void tray_update_tooltip(void)
     nid.hIcon  = g_st.winws_running ? g_icoTrayOn : g_icoTrayOff;
     wcsncpy(nid.szTip, tip, 127);
     nid.szTip[127] = 0;
-    Shell_NotifyIconW(NIM_MODIFY, &nid);
 
+    if (!Shell_NotifyIconW(NIM_MODIFY, &nid)) {
+        /*
+         * The shell may have dropped the icon (for example, during an
+         * Explorer restart). Do not cache a state that was not applied;
+         * re-add the icon with the current status and retry on the timer
+         * if that add also fails.
+         */
+        g_tray_added = FALSE;
+        g_tray_on_cache = -1;
+        g_tray_tip_cache[0] = 0;
+        tray_add(FALSE);
+        return;
+    }
+
+    /* Update the cache only after Windows accepted NIM_MODIFY. */
     tray_tip_cache_store(tip);
 }
 
@@ -1017,11 +1050,14 @@ static void show_main_window(void)
     SetForegroundWindow(g_hMain);
     g_hidden = FALSE;
     refresh_status(TRUE);
+    tray_update_tooltip();
 }
 
 static void hide_to_tray(HWND hwnd)
 {
-    tray_add(TRUE);
+    /* Reuse the existing icon when the window is hidden more than once. */
+    if (!g_tray_added) tray_add(TRUE);
+    else tray_update_tooltip();
     ShowWindow(hwnd, SW_HIDE);
     g_hidden = TRUE;
     ui_log(ZLOG_INFO, L"%s", zg_str(S_LOG_HIDDEN));
@@ -1222,9 +1258,15 @@ static BOOL status_same(const ZgStatus* a, const ZgStatus* b)
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    /* TaskbarCreated: explorer restarted — re-add the tray icon */
+    /* TaskbarCreated: Explorer restarted — restore any wanted tray icon,
+     * even if the main window had already been reopened from the tray. */
     if (g_msgTaskbarCreated && msg == g_msgTaskbarCreated) {
-        if (g_hidden) { g_tray_added = FALSE; tray_add(FALSE); }
+        if (g_tray_wanted) {
+            g_tray_added = FALSE;
+            g_tray_on_cache = -1;
+            g_tray_tip_cache[0] = 0;
+            tray_add(FALSE);
+        }
         return 0;
     }
 
